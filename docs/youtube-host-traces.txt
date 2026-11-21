@@ -1,0 +1,402 @@
+
+=== host.log ===
+    0.000ms python.entry duration_ms=0.000
+ 1162.053ms yt_dlp.imports duration_ms=1162.009
+ 1162.118ms yt_dlp.cli.start duration_ms=0.000
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+ 1711.638ms js.runtime_probe.start duration_ms=0.000
+ 1720.762ms js.runtime_probe.finished duration_ms=9.123
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+ 1778.757ms http.watch_page.start duration_ms=0.000
+ 1789.375ms http.wire_send.start duration_ms=0.000
+ 6674.168ms http.wire_send.ok duration_ms=4884.790
+ 6674.194ms http.wire_headers.start duration_ms=0.000
+ 7276.890ms http.wire_headers.ok duration_ms=602.693
+ 7278.433ms http.wire_send.start duration_ms=0.000
+11875.604ms http.wire_send.ok duration_ms=4597.165
+11875.633ms http.wire_headers.start duration_ms=0.000
+12022.211ms http.wire_headers.ok duration_ms=146.574
+12022.404ms http.watch_page.error duration_ms=10243.648
+verbose.warning.fetch_failed status=429
+verbose.info.redacted
+12025.363ms http.youtube_other.start duration_ms=0.000
+12025.854ms http.wire_send.start duration_ms=0.000
+16534.987ms http.wire_send.ok duration_ms=4509.128
+16535.019ms http.wire_headers.start duration_ms=0.000
+17257.430ms http.wire_headers.ok duration_ms=722.408
+17276.013ms http.youtube_other.ok duration_ms=5250.649
+17284.830ms youtube.player_responses.start duration_ms=0.000
+verbose.info.redacted
+17285.341ms http.youtube_other.start duration_ms=0.000
+17285.745ms http.wire_send.start duration_ms=0.000
+21995.759ms http.wire_send.ok duration_ms=4710.008
+21995.814ms http.wire_headers.start duration_ms=0.000
+22136.976ms http.wire_headers.ok duration_ms=141.158
+22138.096ms http.youtube_other.ok duration_ms=4852.753
+verbose.info.player_js
+22141.186ms http.player_js.start duration_ms=0.000
+22141.671ms http.wire_send.start duration_ms=0.000
+26658.339ms http.wire_send.ok duration_ms=4516.662
+26658.372ms http.wire_headers.start duration_ms=0.000
+26744.851ms http.wire_headers.ok duration_ms=86.474
+26878.102ms http.player_js.ok duration_ms=4736.911
+verbose.info.player_api.client_tv_samsung
+26883.738ms http.player_api.start duration_ms=0.000
+26884.326ms http.wire_send.start duration_ms=0.000
+31482.990ms http.wire_send.ok duration_ms=4598.659
+31483.016ms http.wire_headers.start duration_ms=0.000
+31597.989ms http.wire_headers.ok duration_ms=114.968
+31598.480ms http.player_api.ok duration_ms=4714.742
+verbose.debug.redacted
+verbose.info.player_api.client_visionos
+31602.284ms http.player_api.start duration_ms=0.000
+31603.322ms http.wire_send.start duration_ms=0.000
+36014.694ms http.wire_send.ok duration_ms=4411.368
+36014.743ms http.wire_headers.start duration_ms=0.000
+36135.135ms http.wire_headers.ok duration_ms=120.387
+36135.710ms http.player_api.ok duration_ms=4533.427
+verbose.debug.redacted
+verbose.info.player_api.client_web
+36140.367ms http.player_api.start duration_ms=0.000
+36141.482ms http.wire_send.start duration_ms=0.000
+41207.638ms http.wire_send.ok duration_ms=5066.119
+41207.754ms http.wire_headers.start duration_ms=0.000
+41380.276ms http.wire_headers.ok duration_ms=172.518
+41426.242ms http.player_api.ok duration_ms=5285.872
+41431.527ms youtube.player_responses.ok duration_ms=24146.697
+41431.965ms youtube.formats_and_subtitles.start duration_ms=0.000
+41431.973ms youtube.formats_and_subtitles.ok duration_ms=0.008
+verbose.warning.player_token_notice
+verbose.debug.redacted
+verbose.error.sign_in_required
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+
+=== variant-default.log ===
+    0.000ms python.entry duration_ms=0.000
+ 1065.874ms yt_dlp.imports duration_ms=1065.821
+ 1065.939ms yt_dlp.cli.start duration_ms=0.000
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+ 1596.169ms js.runtime_probe.start duration_ms=0.000
+ 1602.931ms js.runtime_probe.finished duration_ms=6.761
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+ 1658.454ms http.watch_page.start duration_ms=0.000
+ 1668.699ms http.wire_send.start duration_ms=0.000
+ 5931.380ms http.wire_send.ok duration_ms=4262.678
+ 5931.405ms http.wire_headers.start duration_ms=0.000
+ 6192.653ms http.wire_headers.ok duration_ms=261.246
+ 6910.003ms http.watch_page.ok duration_ms=5251.548
+ 6971.697ms youtube.player_responses.start duration_ms=0.000
+verbose.debug.redacted
+verbose.info.redacted
+verbose.info.player_api.client_tv_samsung
+ 6977.317ms http.player_api.start duration_ms=0.000
+ 6977.978ms http.wire_send.start duration_ms=0.000
+11410.157ms http.wire_send.ok duration_ms=4432.176
+11410.182ms http.wire_headers.start duration_ms=0.000
+11585.795ms http.wire_headers.ok duration_ms=175.609
+11586.449ms http.player_api.ok duration_ms=4609.132
+verbose.info.player_api.client_visionos
+11591.260ms http.player_api.start duration_ms=0.000
+11591.859ms http.wire_send.start duration_ms=0.000
+15992.294ms http.wire_send.ok duration_ms=4400.432
+15992.318ms http.wire_headers.start duration_ms=0.000
+16161.777ms http.wire_headers.ok duration_ms=169.455
+16162.819ms http.player_api.ok duration_ms=4571.558
+16167.046ms youtube.player_responses.ok duration_ms=9195.350
+16167.676ms youtube.formats_and_subtitles.start duration_ms=0.000
+16167.685ms youtube.formats_and_subtitles.ok duration_ms=0.010
+verbose.info.player_js
+16184.270ms http.player_js.start duration_ms=0.000
+16184.897ms http.wire_send.start duration_ms=0.000
+20617.760ms http.wire_send.ok duration_ms=4432.857
+20617.790ms http.wire_headers.start duration_ms=0.000
+20698.836ms http.wire_headers.ok duration_ms=81.042
+20792.819ms http.player_js.ok duration_ms=4608.433
+verbose.info.js_challenge
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+20903.506ms js.challenge_process.start duration_ms=0.000
+23282.835ms js.challenge_process.finished duration_ms=2379.328
+verbose.warning.redacted
+verbose.info.hls_manifest
+23361.482ms http.googlevideo.start duration_ms=0.000
+23361.952ms http.wire_send.start duration_ms=0.000
+27801.747ms http.wire_send.ok duration_ms=4439.790
+27801.788ms http.wire_headers.start duration_ms=0.000
+27853.696ms http.wire_headers.ok duration_ms=51.904
+27853.827ms http.googlevideo.ok duration_ms=4492.347
+verbose.warning.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.info.redacted
+
+=== variant-web.log ===
+    0.000ms python.entry duration_ms=0.000
+ 1320.276ms yt_dlp.imports duration_ms=1320.230
+ 1320.354ms yt_dlp.cli.start duration_ms=0.000
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+ 1918.074ms js.runtime_probe.start duration_ms=0.000
+ 1924.711ms js.runtime_probe.finished duration_ms=6.637
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+ 2008.837ms http.watch_page.start duration_ms=0.000
+ 2024.050ms http.wire_send.start duration_ms=0.000
+ 6481.129ms http.wire_send.ok duration_ms=4457.075
+ 6481.160ms http.wire_headers.start duration_ms=0.000
+ 6625.025ms http.wire_headers.ok duration_ms=143.862
+ 7436.049ms http.watch_page.ok duration_ms=5427.212
+ 7484.687ms youtube.player_responses.start duration_ms=0.000
+verbose.debug.redacted
+verbose.info.redacted
+ 7489.617ms youtube.player_responses.ok duration_ms=4.930
+ 7490.106ms youtube.formats_and_subtitles.start duration_ms=0.000
+ 7490.115ms youtube.formats_and_subtitles.ok duration_ms=0.010
+verbose.debug.player_token_notice
+verbose.debug.redacted
+verbose.warning.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.error.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+
+=== variant-tv.log ===
+    0.000ms python.entry duration_ms=0.000
+ 1044.983ms yt_dlp.imports duration_ms=1044.954
+ 1045.152ms yt_dlp.cli.start duration_ms=0.000
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+ 1573.748ms js.runtime_probe.start duration_ms=0.000
+ 1581.189ms js.runtime_probe.finished duration_ms=7.441
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+ 1659.323ms http.watch_page.start duration_ms=0.000
+ 1675.717ms http.wire_send.start duration_ms=0.000
+ 6114.281ms http.wire_send.ok duration_ms=4438.549
+ 6114.347ms http.wire_headers.start duration_ms=0.000
+ 6289.026ms http.wire_headers.ok duration_ms=174.677
+ 7436.158ms http.watch_page.ok duration_ms=5776.821
+ 7803.576ms youtube.player_responses.start duration_ms=0.000
+verbose.info.redacted
+ 7806.641ms http.youtube_other.start duration_ms=0.000
+ 7807.651ms http.wire_send.start duration_ms=0.000
+12255.270ms http.wire_send.ok duration_ms=4447.601
+12255.320ms http.wire_headers.start duration_ms=0.000
+12438.662ms http.wire_headers.ok duration_ms=183.338
+12484.307ms http.youtube_other.ok duration_ms=4677.665
+verbose.debug.redacted
+verbose.info.redacted
+verbose.info.player_js
+12495.511ms http.player_js.start duration_ms=0.000
+12496.145ms http.wire_send.start duration_ms=0.000
+17012.613ms http.wire_send.ok duration_ms=4516.463
+17012.664ms http.wire_headers.start duration_ms=0.000
+17087.468ms http.wire_headers.ok duration_ms=74.801
+17186.909ms http.player_js.ok duration_ms=4691.395
+verbose.info.player_api.client_tv
+17194.694ms http.player_api.start duration_ms=0.000
+17195.797ms http.wire_send.start duration_ms=0.000
+21637.869ms http.wire_send.ok duration_ms=4442.068
+21637.921ms http.wire_headers.start duration_ms=0.000
+21808.727ms http.wire_headers.ok duration_ms=170.801
+21811.581ms http.player_api.ok duration_ms=4616.886
+verbose.debug.redacted
+21819.736ms youtube.player_responses.ok duration_ms=14016.163
+21823.878ms youtube.formats_and_subtitles.start duration_ms=0.000
+21823.898ms youtube.formats_and_subtitles.ok duration_ms=0.022
+verbose.error.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+verbose.info.redacted
+
+=== standalone-host.log ===
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+verbose.debug.redacted
+verbose.info.redacted
+verbose.info.player_api.client_tv_samsung
+verbose.info.player_api.client_visionos
+verbose.info.player_js
+verbose.info.js_challenge
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.warning.redacted
+verbose.info.hls_manifest
+verbose.warning.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.info.redacted
+
+=== latest-host.log ===
+    0.000ms python.entry duration_ms=0.000
+ 1042.609ms yt_dlp.imports duration_ms=1042.544
+ 1042.711ms yt_dlp.cli.start duration_ms=0.000
+verbose.debug.timeout
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+ 1633.944ms js.runtime_probe.start duration_ms=0.000
+ 1640.513ms js.runtime_probe.finished duration_ms=6.568
+verbose.debug.js_runtime_inventory
+verbose.debug.redacted
+verbose.debug.http_handlers
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.player_token_notice
+verbose.debug.js_provider_inventory
+verbose.info.redacted
+verbose.info.watch_page
+ 1718.415ms http.watch_page.start duration_ms=0.000
+ 1731.594ms http.wire_send.start duration_ms=0.000
+ 6269.986ms http.wire_send.ok duration_ms=4538.390
+ 6270.074ms http.wire_headers.start duration_ms=0.000
+ 6463.358ms http.wire_headers.ok duration_ms=193.281
+ 7052.725ms http.watch_page.ok duration_ms=5334.308
+ 7109.286ms youtube.player_responses.start duration_ms=0.000
+verbose.debug.redacted
+verbose.info.redacted
+verbose.info.player_api.client_tv_samsung
+ 7114.555ms http.player_api.start duration_ms=0.000
+ 7115.396ms http.wire_send.start duration_ms=0.000
+11661.379ms http.wire_send.ok duration_ms=4545.979
+11661.423ms http.wire_headers.start duration_ms=0.000
+11833.309ms http.wire_headers.ok duration_ms=171.882
+11833.879ms http.player_api.ok duration_ms=4719.325
+verbose.info.player_api.client_visionos
+11840.003ms http.player_api.start duration_ms=0.000
+11840.770ms http.wire_send.start duration_ms=0.000
+16356.496ms http.wire_send.ok duration_ms=4515.723
+16356.581ms http.wire_headers.start duration_ms=0.000
+16525.991ms http.wire_headers.ok duration_ms=169.387
+16527.079ms http.player_api.ok duration_ms=4687.075
+16530.954ms youtube.player_responses.ok duration_ms=9421.670
+16531.479ms youtube.formats_and_subtitles.start duration_ms=0.000
+verbose.info.player_js
+16548.433ms http.player_js.start duration_ms=0.000
+16549.707ms http.wire_send.start duration_ms=0.000
+21119.801ms http.wire_send.ok duration_ms=4570.090
+21119.846ms http.wire_headers.start duration_ms=0.000
+21173.168ms http.wire_headers.ok duration_ms=53.318
+21263.121ms http.player_js.ok duration_ms=4714.686
+verbose.info.js_challenge
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+21462.727ms js.challenge_process.start duration_ms=0.000
+23742.010ms js.challenge_process.finished duration_ms=2279.281
+verbose.warning.redacted
+verbose.info.hls_manifest
+23823.383ms http.googlevideo.start duration_ms=0.000
+23823.985ms http.wire_send.start duration_ms=0.000
+28746.397ms http.wire_send.ok duration_ms=4922.407
+28746.531ms http.wire_headers.start duration_ms=0.000
+28795.538ms http.wire_headers.ok duration_ms=49.004
+28795.705ms http.googlevideo.ok duration_ms=4972.325
+verbose.warning.redacted
+28797.559ms youtube.formats_and_subtitles.ok duration_ms=12266.077
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.debug.redacted
+verbose.info.redacted

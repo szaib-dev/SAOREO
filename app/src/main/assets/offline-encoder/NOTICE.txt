@@ -1,0 +1,16 @@
+SAOREO offline conversion component
+FFmpeg 8.1.3 and LAME 3.100 (libmp3lame)
+Copyright (c) 2000–2026 the FFmpeg developers
+Copyright (c) the LAME developers and contributors
+
+This separate executable is distributed under the GNU Lesser General Public
+License, version 2.1 or later, as applicable to the combined executable. The
+original license texts are included alongside this notice. SAOREO adds a Linux
+parent-death guard to its Android build. No GPL or nonfree FFmpeg options are
+enabled for this component.
+
+Corresponding source archives and the build/install script accompany the
+SAOREO source distribution. tools/build-offline-encoder.sh applies the patch
+and produces the replaceable executable for each Android ABI. Rebuild the
+application with your own Android signing key to run a replacement on-device.
+Upstream: https://ffmpeg.org/releases/ and https://lame.sourceforge.io/
