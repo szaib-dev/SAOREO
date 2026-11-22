@@ -35,7 +35,7 @@ internal data class TogetherState(val connected: Boolean = false, val connecting
     val members: List<TogetherMember> = emptyList(), val media: TogetherMedia? = null, val queue: List<TogetherMedia> = emptyList(),
     val timeline: SharedTimeline = SharedTimeline(0, 0, false), val wanted: Boolean = false, val wait: Boolean = true,
     val chat: List<TogetherChat> = emptyList(), val reaction: TogetherReaction? = null,
-    val request: RoomRequest? = null, val answer: RoomAnswer? = null)
+    val request: RoomRequest? = null, val answer: RoomAnswer? = null, val callFullscreen: Boolean = false)
 
 internal val TogetherState.canStartPlayback: Boolean
     get() = connected && media != null && members.size == 2 &&
@@ -75,54 +75,31 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     fun uploadDataSource(): DefaultHttpDataSource.Factory = DefaultHttpDataSource.Factory()
         .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
 
-    suspend fun shareVideo(resolver: ContentResolver, uri: Uri, onProgress: (Long, Long) -> Unit): String {
+    private val sharedFiles by lazy { TogetherSharedFiles(this, getApplication<Application>().contentResolver, viewModelScope) }
+    fun localSharedSource(id: String): String? = sharedFiles.local(id)
+    fun sharedFileUrl(id: String): String = "$endpoint/together/share/${state.value.room}/$id"
+    fun fullCall(enabled: Boolean) = send("callView", JSONObject().put("enabled", enabled))
+
+    suspend fun shareLocalVideo(resolver: ContentResolver, uri: Uri): TogetherMedia {
         val room = state.value.room
         check(state.value.connected && room.isNotEmpty()) { "Reconnect to your room before sharing." }
-        val client = http.newBuilder().followRedirects(false).callTimeout(10, TimeUnit.MINUTES).build()
-        val maximum = 100L * 1024 * 1024
-        val length = withContext(Dispatchers.IO) {
-            resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
-        }
-        check(length <= maximum) { "Choose an MP4 under 100 MiB." }
-        val body = object : RequestBody() {
-            override fun contentType() = "video/mp4".toMediaType()
-            override fun contentLength() = length
-            override fun writeTo(sink: okio.BufferedSink) {
-                val input = resolver.openInputStream(uri) ?: throw java.io.IOException("Unable to open this video.")
-                input.use {
-                    val buffer = ByteArray(128 * 1024)
-                    var sent = 0L
-                    while (true) {
-                        val bytes = it.read(buffer)
-                        if (bytes < 0) break
-                        sent += bytes
-                        if (sent > maximum) throw java.io.IOException("Choose an MP4 under 100 MiB.")
-                        sink.write(buffer, 0, bytes)
-                        onProgress(sent, length)
-                    }
-                }
+        val video = inspectSharedVideo(resolver, uri)
+        val body = JSONObject().put("size", video.size).put("mime", video.mime)
+        val request = Request.Builder().url("$endpoint/together/share/$room")
+            .header("Authorization", "Bearer $token")
+            .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+        val id = withContext(Dispatchers.IO) {
+            http.newCall(request).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (response.code == 404) throw java.io.IOException("The Together server needs the 2.9.2 streaming update.")
+                val payload = runCatching { JSONObject(raw) }.getOrNull()
+                check(response.isSuccessful) { payload?.optString("error") ?: "Could not share this source (HTTP ${response.code})." }
+                payload?.getString("id") ?: throw java.io.IOException("Invalid shared-source response.")
             }
         }
-        val request = Request.Builder().url("$endpoint/together/media/$room")
-            .header("Authorization", "Bearer $token").post(body).build()
-        return suspendCancellableCoroutine { continuation ->
-            val call = client.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: java.io.IOException) {
-                    continuation.resumeWith(Result.failure(e))
-                }
-                override fun onResponse(call: Call, response: Response) {
-                    continuation.resumeWith(runCatching {
-                        response.use {
-                            val payload = JSONObject(it.body?.string().orEmpty())
-                            check(it.isSuccessful) { payload.optString("error", "Could not share this video.") }
-                            payload.getString("id")
-                        }
-                    })
-                }
-            })
-        }
+        check(state.value.connected && state.value.room == room) { "The room changed. Choose the video again." }
+        sharedFiles.remember(id, room, video)
+        return TogetherMedia("", "relay", id, video.title, video.duration, false)
     }
 
     fun enter(url: String, name: String, key: String? = null, invite: String? = null) {
@@ -170,7 +147,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                 viewModelScope.launch {
                     if (run != generation || leaving) { webSocket.close(1000, null); return@launch }
                     seq = 0
-                    webSocket.send(JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 2).toString())
+                    webSocket.send(JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 3).toString())
                     heartbeat?.cancel()
                     heartbeat = viewModelScope.launch {
                         while (isActive) {
@@ -216,6 +193,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         runCatching {
             val json = JSONObject(text)
             when (json.getString("type")) {
+                "fileRead" -> sharedFiles.serve(json)
                 "pong" -> {
                     val sent = json.getLong("sent"); val received = SystemClock.elapsedRealtime(); val rtt = received - sent
                     if (rtt in 0..bestRtt) {
@@ -234,7 +212,8 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                         request = json.optJSONObject("request")?.roomRequest(),
                         media = json.optJSONObject("media")?.let(::media), queue = json.getJSONArray("queue").objects().map(::media),
                         timeline = SharedTimeline(json.getDouble("position").toLong(), json.getLong("serverTime"), json.getBoolean("playing")),
-                        wanted = json.getBoolean("wanted"), wait = json.getBoolean("wait"))
+                        wanted = json.getBoolean("wanted"), wait = json.getBoolean("wait"),
+                        callFullscreen = json.optBoolean("callFullscreen"))
                 }
                 "history" -> mutable.value = mutable.value.copy(chat = json.getJSONArray("messages").objects().map(::chat))
                 "chat" -> {
@@ -264,6 +243,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     fun setMedia(item: TogetherMedia, queue: Boolean = false) = send(if (queue) "queueAdd" else "media", JSONObject().put("media", item.json()))
     fun leave() {
         send("leave")
+        sharedFiles.clear()
         leaving = true; generation++; reconnect?.cancel(); heartbeat?.cancel()
         socket?.close(1000, "Left room"); socket = null; token = ""
         onConnectionLost?.invoke()

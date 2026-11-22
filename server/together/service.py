@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from aiohttp import web, WSMsgType
+from relay import FileRelay
 
 def now():
     return int(time.time() * 1000)
@@ -41,7 +42,7 @@ def media_item(data):
     elif kind == 'local':
         if not re.fullmatch(r'[a-f0-9]{64}', source):
             raise ValueError('Invalid local file fingerprint')
-    elif kind == 'upload':
+    elif kind in ('upload', 'relay'):
         if not re.fullmatch(r'[a-f0-9]{32}', source):
             raise ValueError('Invalid shared video')
     else:
@@ -80,6 +81,7 @@ class Room:
     wanted: bool = False
     playing: bool = False
     wait: bool = True
+    call_fullscreen: bool = False
     revision: int = 0
     updated: int = field(default_factory=now)
 
@@ -104,7 +106,7 @@ class Room:
         stamp = now()
         return dict(type='state', room=self.id, revision=self.revision, serverTime=stamp,
                     position=self.position_at(stamp), playing=self.playing, wanted=self.wanted,
-                    wait=self.wait, media=self.media, queue=self.queue, request=self.request,
+                    wait=self.wait, callFullscreen=self.call_fullscreen, media=self.media, queue=self.queue, request=self.request,
                     members=[dict(id=m.id, name=m.name, ordinal=m.ordinal, online=m.ws is not None,
                                   ready=m.ready, buffering=m.buffering, call=m.call, mic=m.mic,
                                   camera=m.camera) for m in self.members.values()])
@@ -121,6 +123,7 @@ class Together:
         self.uploads = {}
         self.upload_lock = asyncio.Lock()
         self.upload_dir = None
+        self.relay = FileRelay(self)
 
     def authenticate_media(self, request):
         room = self.rooms.get(request.match_info['room'])
@@ -257,6 +260,9 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
     async def command(self, room, m, data):
         op = data.get('type')
         room.updated = m.last_seen = now()
+        if op == 'fileChunk':
+            await self.relay.chunk(room, m, data)
+            return
         if op == 'ping':
             await m.ws.send_json(dict(type='pong', sent=data.get('sent'), serverTime=now()))
             return
@@ -329,6 +335,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             else: room.position = number(data.get('position'))
         elif op in ('media', 'queueAdd'):
             item = media_item(data.get('media', {}))
+            if item['kind'] == 'relay' and (not self.relay.valid(room, item['source']) or any(p.ws is not None and p.protocol < 3 for p in room.members.values())):
+                raise ValueError('Update both phones to SAOREO 2.9.2 and reselect the local video')
             if item['kind'] == 'upload' and self.uploads.get(item['source'], (None,))[0] != room.id:
                 raise ValueError('Shared video expired')
             if item['kind'] == 'upload' and any(p.ws is not None and p.protocol < 2 for p in room.members.values()):
@@ -354,10 +362,16 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             if not room.media or data.get('mediaId') != room.media['id']: return
             m.ready = data.get('ready') is True
             m.buffering = room.wanted and data.get('buffering') is True
+        elif op == 'callView':
+            enabled = data.get('enabled') is True
+            if enabled and not (len(room.members) == 2 and all(p.ws is not None and p.call and p.protocol >= 3 for p in room.members.values())):
+                raise ValueError('Both participants must join the call and update SAOREO before opening full call')
+            room.call_fullscreen = enabled
         elif op == 'call':
             m.call = data.get('active') is True
             m.mic = m.call and data.get('mic') is True
             m.camera = m.call and data.get('camera') is True
+            if not m.call: room.call_fullscreen = False
         elif op == 'wait':
             room.wait = data.get('enabled') is True
         elif op == 'resetPartner':
@@ -371,6 +385,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             await m.ws.send_json(dict(type='invite', invite=room.id + '.' + room.invitation))
         elif op == 'leave':
             socket = m.ws
+            self.relay.disconnected(m)
+            room.call_fullscreen = False
             room.members.pop(m.id, None)
             m.ws = None
             room.wanted = False
@@ -393,7 +409,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
 
     async def socket(self, request):
         self.limit(('ws', self.ip(request)), 40, 300)
-        ws = web.WebSocketResponse(heartbeat=20, receive_timeout=90, max_msg_size=32768, compress=False)
+        ws = web.WebSocketResponse(heartbeat=20, receive_timeout=90, max_msg_size=196608, compress=False)
         await ws.prepare(request)
         room = member = None
         try:
@@ -402,8 +418,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             if not room: raise ValueError('Room expired')
             member = next((m for m in room.members.values() if hmac.compare_digest(m.token, str(hello.get('token', '')))), None)
             if not member: raise ValueError('Invalid room session')
-            member.protocol = int(number(hello.get('protocol', 1), low=1, high=2))
-            if member.protocol < 2 and room.media and room.media['kind'] == 'upload':
+            member.protocol = int(number(hello.get('protocol', 1), low=1, high=3))
+            if room.media and (member.protocol < 2 and room.media['kind'] == 'upload' or member.protocol < 3 and room.media['kind'] == 'relay'):
                 await ws.send_json(dict(type='error', message='Update SAOREO to play shared local videos'))
                 await ws.close(code=4003)
                 return ws
@@ -415,9 +431,9 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT: break
                 try:
-                    self.limit(('member', room.id, member.id), 160, 10)
                     data = json.loads(msg.data)
                     if not isinstance(data, dict): raise ValueError('Invalid message')
+                    self.limit(('chunks' if data.get('type') == 'fileChunk' else 'member', room.id, member.id), 400 if data.get('type') == 'fileChunk' else 160, 10)
                     await self.command(room, member, data)
                 except (ValueError, TypeError, KeyError, web.HTTPException) as ex:
                     await ws.send_json(dict(type='error', message=str(ex)[:180]))
@@ -425,6 +441,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             await ws.close(code=4003, message=b'Invalid or expired room session')
         finally:
             if member is not None and member.ws is ws:
+                self.relay.disconnected(member)
+                room.call_fullscreen = False
                 member.ws = None; member.ready = False; member.call = member.mic = member.camera = False
                 if room and room.id in self.rooms:
                     room.request = None
@@ -443,6 +461,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                         for m in room.members.values():
                             if m.ws is not None: await m.ws.close(code=4004, message=b'Room expired')
                         self.rooms.pop(rid, None)
+                self.relay.cleanup()
                 for identifier, (room_id, path, created) in list(self.uploads.items()):
                     if room_id not in self.rooms or now() - created > 14_400_000:
                         self.uploads.pop(identifier)
@@ -458,7 +477,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
 
     def app(self):
         async def health(request):
-            return web.json_response(dict(status='ok', version='1.0'))
+            return web.json_response(dict(status='ok', version='1.1', protocol=3, features=['rangeRelay', 'sharedFullCall']))
         async def asset_links(request):
             return web.json_response([{
                 'relation': ['delegate_permission/common.handle_all_urls'],
@@ -489,6 +508,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
         app.router.add_get('/together/join', self.invitation_page)
         app.router.add_post('/together/media/{room}', self.upload_video)
         app.router.add_get('/together/media/{room}/{id}', self.read_video)
+        app.router.add_post('/together/share/{room}', self.relay.register)
+        app.router.add_get('/together/share/{room}/{id}', self.relay.read)
         app.router.add_get('/together/ws', self.socket)
         app.cleanup_ctx.append(self.cleanup)
         return app

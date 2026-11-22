@@ -151,7 +151,7 @@ def main():
         sftp.mkdir(stage, mode=0o700)
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode='w') as tar:
-            for name in ['service.py', 'requirements.txt', 'test_service.py']:
+            for name in ['service.py', 'relay.py', 'requirements.txt', 'test_service.py', 'test_relay.py']:
                 tar.add(pathlib.Path(__file__).parent / name, arcname=name)
         with sftp.open(stage + '/source.tar', 'wb') as f: f.write(archive.getvalue())
         with sftp.open(stage + '/deploy.sh', 'w') as f: f.write(SCRIPT)

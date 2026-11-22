@@ -52,3 +52,7 @@ Paste or share a YouTube playlist to choose all or individual tracks, save MP3 o
 Public Spotify playlist links import the track details and cover; selected audio uses YouTube matches. This does not download audio from Spotify. The public embed can expose only part of a long playlist, which the picker explains. Full authenticated Spotify pagination is not configured.
 
 Instagram downloads now try MP4 remuxing and H.264/AAC conversion when Android rejects a downloaded container, and refresh format selection during extractor recovery. See [playlist imports and recovery](docs/PLAYLIST_IMPORTS.md) for behavior and limitations.
+
+## Together fixes (2.9.2)
+
+Together now sends consistent readiness/buffering state, retries rejected play commands, streams local MP4/WebM/MKV files from one phone through an authenticated byte-range relay, and synchronizes edge-to-edge full-call mode between both participants. The new relay needs an updated server and 2.9.2 on both phones. See [Together 2.9.2](docs/TOGETHER_2_9_2.md) for the defect, streaming design, deployment requirements and verification limits. Netflix shared playback remains unsupported.

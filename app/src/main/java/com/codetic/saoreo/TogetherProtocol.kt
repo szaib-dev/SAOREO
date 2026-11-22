@@ -39,3 +39,10 @@ internal object TogetherSources {
         return code?.takeIf { it.matches(Regex("[a-f0-9]{12}\\.[A-Za-z0-9_-]{32}")) }
     }
 }
+
+/** Pausing an iframe while it buffers can prevent the iframe from ever becoming ready again. */
+internal fun togetherPlayerStatus(ready: Boolean, buffering: Boolean, youtube: Boolean, wanted: Boolean) =
+    ready to (buffering && !youtube && wanted)
+
+internal fun retryTogetherPlay(expected: Boolean, actual: Boolean, buffering: Boolean, elapsed: Long): Boolean =
+    expected && !actual && !buffering && elapsed >= 2500

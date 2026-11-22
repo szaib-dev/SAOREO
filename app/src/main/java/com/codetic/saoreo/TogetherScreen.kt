@@ -96,7 +96,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
     val playback = remember(session) { TogetherPlayback(session) }
     var showLeave by remember { mutableStateOf(false) }
     var fullscreen by rememberSaveable { mutableStateOf(false) }
-    var callView by rememberSaveable { mutableStateOf(false) }
+    val callView = room.callFullscreen && calling.active
     var callChat by rememberSaveable { mutableStateOf(false) }
     var partnerLeft by rememberSaveable { mutableStateOf(false) }
     var partnerSeen by rememberSaveable { mutableStateOf(false) }
@@ -107,7 +107,6 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
             partnerLeft = false
             partnerSeen = false
             partnerCallSeen = false
-            callView = false
             fullscreen = false
         } else if (room.connected) {
             val online = peer?.online == true
@@ -123,16 +122,17 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
     var browseYouTube by rememberSaveable { mutableStateOf(false) }
     var showNetflix by remember { mutableStateOf(false) }
     val activityContext = context as? ComponentActivity
-    DisposableEffect(fullscreen, activityContext) {
+    DisposableEffect(fullscreen, callView, activityContext) {
         val window = activityContext?.window
         val insets = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, it.decorView) }
-        if (fullscreen) {
+        if (fullscreen || callView) {
             insets?.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            if (activityContext != null) activityContext.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            if (fullscreen && !callView && activityContext != null) activityContext.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            if (callView && activityContext != null) activityContext.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             insets?.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
         }
         onDispose {
-            if (fullscreen) {
+            if (fullscreen || callView) {
                 insets?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
                 if (activityContext != null) activityContext.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
@@ -146,9 +146,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
     var tab by rememberSaveable { mutableStateOf("Chat") }
     var message by rememberSaveable { mutableStateOf("") }
     var localSource by rememberSaveable(room.media?.id) { mutableStateOf<String?>(null) }
-    var choosingMatch by remember { mutableStateOf(false) }
     var loadingFile by remember { mutableStateOf(false) }
-    var uploadFraction by remember { mutableStateOf<Float?>(null) }
     LaunchedEffect(initialInvite) {
         if (initialInvite.isNotBlank() && room.room.isEmpty()) {
             val name = session.preferences.getString("name", null)?.takeIf { it.isNotBlank() } ?: "Guest"
@@ -182,48 +180,12 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
         if (uri != null) scope.launch {
             loadingFile = true
             try {
-                if (!choosingMatch) {
-                    val title = withContext(Dispatchers.IO) {
-                        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-                            ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "Shared video"
-                    }
-                    var lastPercent = -1
-                    val id = session.shareVideo(context.contentResolver, uri) { sent, total ->
-                        if (total > 0) {
-                            val percent = (100 * sent / total).toInt().coerceIn(0, 100)
-                            if (percent != lastPercent) {
-                                lastPercent = percent
-                                uploadFraction = percent / 100f
-                            }
-                        }
-                    }
-                    check(session.setMedia(TogetherMedia("", "upload", id, title, 0, false), queueNew)) {
-                        "Reconnect to the room and choose the video again."
-                    }
-                    return@launch
-                }
-                val info = withContext(Dispatchers.IO) {
-                    runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    context.contentResolver.openInputStream(uri)!!.use { stream ->
-                        val chunk = ByteArray(256 * 1024)
-                        while (true) { val count = stream.read(chunk); if (count < 0) break; digest.update(chunk, 0, count) }
-                    }
-                    val hash = digest.digest().joinToString("") { "%02x".format(it) }
-                    val title = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                        if (it.moveToFirst()) it.getString(0) else "Local video"
-                    } ?: "Local video"
-                    hash to title
-                }
-                if (info.first != room.media?.source) session.error("These files do not match. Choose the exact same video on both phones.")
-                else localSource = uri.toString()
+                val item = session.shareLocalVideo(context.contentResolver, uri)
+                check(session.setMedia(item, queueNew)) { "Reconnect to the room and choose the video again." }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) { session.error(e.message ?: "Unable to share this video.") }
-            finally { loadingFile = false; uploadFraction = null }
+            finally { loadingFile = false }
         }
-    }
-    LaunchedEffect(room.media?.id) {
-        if (room.media?.kind == "local") localSource = session.preferences.getString("local:${room.media?.source}", null)
     }
     LaunchedEffect(room.revision) { call.members(room) }
     LaunchedEffect(room.error, calling.error) {
@@ -245,12 +207,13 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
     BackHandler(room.room.isNotEmpty() && !keyboard) {
         when {
             callView && callChat -> callChat = false
-            callView -> callView = false
+            callView -> session.fullCall(false)
             fullscreen -> fullscreen = false
             else -> showLeave = true
         }
     }
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
+    LaunchedEffect(callView) { if (!callView) callChat = false }
+    Scaffold(contentWindowInsets = if (fullscreen || callView) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets, snackbarHost = { SnackbarHost(snackbar) }, topBar = {
         if (!fullscreen && !callView) Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton({ if (room.room.isNotEmpty()) showLeave = true else finish() }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
             Column(Modifier.weight(1f)) {
@@ -274,7 +237,6 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                 val canControl = room.canStartPlayback && playback.ready
                 if (media != null) {
                     val stage = when {
-                        callView -> Modifier.fillMaxWidth().height(if (keyboard) 1.dp else 110.dp)
                         fullscreen -> Modifier.fillMaxWidth().weight(1f)
                         keyboard -> Modifier.fillMaxWidth().height(112.dp)
                         else -> Modifier.fillMaxWidth().height(210.dp)
@@ -300,9 +262,8 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                                 Text(media.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                                 playback.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                                if (media.kind == "local" && localSource == null) {
-                                    TextButton({ choosingMatch = true; picker.launch(arrayOf("video/*")) }) { Text("Choose matching video") }
-                                }
+                                if (media.kind == "local") Text("The source phone needs to select this video again to stream it.",
+                                    style = MaterialTheme.typography.bodySmall)
                             }
                             TogetherSeekBar(playback.position, playback.duration, canControl && !playback.live) {
                                 session.playback("seek", it)
@@ -321,7 +282,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                                     Icon(painterResource(R.drawable.ic_forward_ten), "Forward 10 seconds")
                                 }
                                 Spacer(Modifier.weight(1f))
-                                if (calling.active && !fullscreen) IconButton({ callView = true }) {
+                                if (calling.active && !fullscreen) IconButton({ session.fullCall(true) }) {
                                     Icon(painterResource(R.drawable.ic_camera), "Open full call")
                                 }
                                 if (!fullscreen) IconButton({ queueNew = false; showMedia = true }) { Icon(Icons.Outlined.Add, "Change video") }
@@ -349,19 +310,6 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                         Text("Choose what to watch")
                     }
                 }
-                if (callView) TogetherCallView(
-                    room, calling, call, message, { message = it.take(2000) },
-                    { if (message.isNotBlank() && session.send("chat", JSONObject().put("text", message.trim()))) message = "" },
-                    callChat, { callChat = !callChat }, { callView = false; callChat = false },
-                    { call.stop(); callView = false; callChat = false },
-                    {
-                        if (calling.camera) call.camera(false)
-                        else {
-                            pendingCall = "camera"
-                            permissions.launch(arrayOf(Manifest.permission.CAMERA))
-                        }
-                    }, Modifier.weight(1f),
-                )
                 if (!fullscreen && !callView) LazyColumn(Modifier.fillMaxWidth().weight(1f), state = listState,
                     contentPadding = PaddingValues(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
@@ -394,7 +342,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                                     }
                                 }
                             }
-                            if (calling.active) TextButton({ callView = true }) { Text("Full call") }
+                            if (calling.active) TextButton({ session.fullCall(true) }) { Text("Full call") }
                             if (calling.active) Text("${calling.connection} \u00b7 ${calling.output} \u00b7 foreground call", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                                 reactions.forEach { (key, glyph) -> TextButton({ session.send("reaction", JSONObject().put("emoji", key)) }, enabled = room.connected,
@@ -433,11 +381,8 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                     }
                 }
                 if (loadingFile) {
-                    val fraction = uploadFraction
-                    val bar = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                    if (fraction == null) LinearProgressIndicator(bar)
-                    else LinearProgressIndicator(progress = { fraction }, modifier = bar)
-                    Text("Sharing video with your room", Modifier.padding(12.dp), style = MaterialTheme.typography.labelSmall)
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    Text("Connecting your shared video", Modifier.padding(12.dp), style = MaterialTheme.typography.labelSmall)
                 }
                 if (!fullscreen && !callView && tab == "Chat") OutlinedTextField(
                     value = message,
@@ -455,6 +400,19 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                     },
                 )
             }
+            if (callView) TogetherCallView(
+                room, calling, call, message, { message = it.take(2000) },
+                { if (message.isNotBlank() && session.send("chat", JSONObject().put("text", message.trim()))) message = "" },
+                callChat, { callChat = !callChat }, { session.fullCall(false); callChat = false },
+                { call.stop(); session.fullCall(false); callChat = false },
+                {
+                    if (calling.camera) call.camera(false)
+                    else {
+                        pendingCall = "camera"
+                        permissions.launch(arrayOf(Manifest.permission.CAMERA))
+                    }
+                }, Modifier.fillMaxSize(),
+            )
             if (partnerLeft) Surface(Modifier.fillMaxSize(), color = Color.White, contentColor = Ink) {
                 Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
@@ -481,7 +439,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
         onDismiss = { showMedia = false },
         onYouTube = { showMedia = false; browseYouTube = true },
         onNetflix = { showMedia = false; showNetflix = true },
-        onPickFile = { choosingMatch = false; showMedia = false; picker.launch(arrayOf("video/mp4")) },
+        onPickFile = { showMedia = false; picker.launch(arrayOf("video/mp4", "video/webm", "video/x-matroska")) },
         onChoose = { item -> session.setMedia(item, queueNew); showMedia = false },
     )
     if (browseYouTube) TogetherYouTubeBrowser(onDismiss = { browseYouTube = false }) { id, live ->
@@ -587,7 +545,7 @@ private fun MediaChooser(onDismiss: () -> Unit, onYouTube: () -> Unit, onNetflix
             if (!showStream) {
                 SourceOption("YouTube", "Browse and tap a video", onYouTube)
                 SourceOption("Netflix", "Open Netflix separately", onNetflix)
-                SourceOption("Local video", "Share an MP4 under 100 MiB with your room", onPickFile)
+                SourceOption("Local video", "Stream a video from this phone. Your partner needs no copy.", onPickFile)
                 TextButton({ showStream = true }) { Text("Direct stream or IPTV") }
                 return@Column
             }
@@ -606,16 +564,17 @@ private fun MediaChooser(onDismiss: () -> Unit, onYouTube: () -> Unit, onNetflix
                 } else error = "Use a YouTube link or a direct HTTPS media URL. Netflix playback cannot be controlled here."
             }, Modifier.fillMaxWidth(), enabled = input.isNotBlank()) { Icon(Icons.Outlined.PlayArrow, null); Text("Select stream") }
             OutlinedButton(onPickFile, Modifier.fillMaxWidth()) { Icon(Icons.Outlined.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Choose a local video") }
-            Text("For local videos, both people choose the exact same file. Private IPTV credentials can be entered separately on each phone after loading the program.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Local videos stream from the source phone while it stays in the room. Private IPTV credentials can be entered separately on each phone after loading the program.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
 @Composable
-internal fun CameraTile(name: String, track: VideoTrack?, enabled: Boolean, call: TogetherCall, mirror: Boolean, modifier: Modifier) {
+internal fun CameraTile(name: String, track: VideoTrack?, enabled: Boolean, call: TogetherCall, mirror: Boolean, modifier: Modifier,
+    fill: Boolean = false, rounded: Boolean = true, showLabel: Boolean = true) {
     val context = LocalContext.current
-    val renderer = remember(call) { SurfaceViewRenderer(context).apply {
-        init(call.egl.eglBaseContext, null); setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT); setMirror(mirror)
+    val renderer = remember(call, fill) { SurfaceViewRenderer(context).apply {
+        init(call.egl.eglBaseContext, null); setScalingType(if (fill) RendererCommon.ScalingType.SCALE_ASPECT_FILL else RendererCommon.ScalingType.SCALE_ASPECT_FIT); setMirror(mirror)
         setEnableHardwareScaler(true); setZOrderMediaOverlay(true)
     } }
     DisposableEffect(renderer, track, enabled) {
@@ -623,13 +582,13 @@ internal fun CameraTile(name: String, track: VideoTrack?, enabled: Boolean, call
         onDispose { if (enabled) runCatching { track?.removeSink(renderer) } }
     }
     DisposableEffect(renderer) { onDispose { renderer.release() } }
-    Box(modifier.clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+    Box(modifier.clip(RoundedCornerShape(if (rounded) 20.dp else 0.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
         if (enabled && track != null) AndroidView(factory = { renderer }, modifier = Modifier.fillMaxSize())
         else Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Icon(painterResource(R.drawable.ic_camera_off), null, Modifier.size(25.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("Camera off", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Surface(Modifier.align(Alignment.BottomStart).padding(7.dp), color = Ink.copy(alpha = .75f), shape = RoundedCornerShape(8.dp)) {
+        if (showLabel) Surface(Modifier.align(Alignment.BottomStart).padding(7.dp), color = Ink.copy(alpha = .75f), shape = RoundedCornerShape(8.dp)) {
             Text(name, Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = Color.White, style = MaterialTheme.typography.labelSmall)
         }
     }

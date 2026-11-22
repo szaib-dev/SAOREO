@@ -23,7 +23,13 @@ import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFram
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
 import kotlinx.coroutines.delay
 
-internal class TogetherPlayback(private val session: TogetherSession) {
+internal class TogetherPlayback(
+    private val roomState: () -> TogetherState,
+    private val serverClock: () -> Long,
+    private val sendStatus: (Boolean, Boolean) -> Boolean,
+    private val elapsedClock: () -> Long = SystemClock::elapsedRealtime,
+) {
+    constructor(session: TogetherSession) : this({ session.state.value }, session::serverNow, session::status)
     var position by mutableLongStateOf(0)
     var duration by mutableLongStateOf(0)
     var ready by mutableStateOf(false)
@@ -31,6 +37,8 @@ internal class TogetherPlayback(private val session: TogetherSession) {
     var error by mutableStateOf<String?>(null)
     var live by mutableStateOf(false)
     var youtube = false
+    var actualPlaying = false
+    private var lastPlayCommand = 0L
     var seek: ((Long) -> Unit)? = null
     var play: ((Boolean) -> Unit)? = null
     var lastApplied: Boolean? = null
@@ -43,22 +51,25 @@ internal class TogetherPlayback(private val session: TogetherSession) {
         if (!room.connected || !ready) {
             remote { play?.invoke(false) }; lastApplied = false; return
         }
-        val now = SystemClock.elapsedRealtime()
+        val now = elapsedClock()
         val changed = lastApplied != room.timeline.playing
         if (!live && !buffering && (force || now - lastCorrection >= 3500) &&
-            room.timeline.needsSeek(position, session.serverNow(), if (room.timeline.playing) 2200 else 650)) {
-            seek?.invoke(room.timeline.target(session.serverNow()).let { if (duration > 0) it.coerceAtMost(duration) else it })
+            room.timeline.needsSeek(position, serverClock(), if (room.timeline.playing) 2200 else 650)) {
+            seek?.invoke(room.timeline.target(serverClock()).let { if (duration > 0) it.coerceAtMost(duration) else it })
             lastCorrection = now
         }
-        if (changed || force) play?.invoke(room.timeline.playing)
+        if (changed || force || retryTogetherPlay(room.timeline.playing, actualPlaying, buffering, now - lastPlayCommand)) {
+            play?.invoke(room.timeline.playing)
+            lastPlayCommand = now
+        }
         lastApplied = room.timeline.playing
     }
     fun report() {
-        val status = ready to (buffering && !youtube && session.state.value.wanted)
-        if (!session.state.value.connected) lastStatus = null
-        else if (status != lastStatus && session.status(ready, buffering)) lastStatus = status
+        val status = togetherPlayerStatus(ready, buffering, youtube, roomState().wanted)
+        if (!roomState().connected) lastStatus = null
+        else if (status != lastStatus && sendStatus(status.first, status.second)) lastStatus = status
     }
-    fun reset() { ready = false; buffering = false; error = null; position = 0; duration = 0; lastApplied = null; lastStatus = null }
+    fun reset() { actualPlaying = false; live = false; lastPlayCommand = 0; lastCorrection = 0; ready = false; buffering = false; error = null; position = 0; duration = 0; lastApplied = null; lastStatus = null }
 }
 
 @Composable
@@ -76,9 +87,11 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
         if (media.kind == "youtube") {
             val view = remember { YouTubePlayerView(context).apply { enableAutomaticInitialization = false } }
             DisposableEffect(view) {
+                var active = true
                 lifecycle.lifecycle.addObserver(view)
                 view.initialize(object : AbstractYouTubePlayerListener() {
                     override fun onReady(player: YouTubePlayer) {
+                        if (!active) { return }
                         var started = false
                         playback.seek = { if (started) player.seekTo(it / 1000f) }
                         playback.play = { shouldPlay ->
@@ -92,42 +105,47 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                         playback.remote { player.cueVideo(media.source, room.timeline.target(session.serverNow()) / 1000f) }
                     }
                     override fun onVideoId(youTubePlayer: YouTubePlayer, videoId: String) {
-                        if (videoId == media.source) {
+                        if (active && videoId == media.source) {
                             playback.ready = true
                             playback.report()
                         }
                     }
                     override fun onStateChange(player: YouTubePlayer, state: PlayerConstants.PlayerState) {
+                        if (!active) { return }
                         when (state) {
-                            PlayerConstants.PlayerState.VIDEO_CUED -> { playback.ready = true; playback.buffering = false; playback.report() }
+                            PlayerConstants.PlayerState.VIDEO_CUED -> { playback.actualPlaying = false; playback.ready = true; playback.buffering = false; playback.report() }
                             PlayerConstants.PlayerState.BUFFERING -> playback.buffering = true
                             PlayerConstants.PlayerState.PLAYING -> {
-                                if (!session.state.value.timeline.playing) {
-                                    playback.remote { player.pause() }
-                                }
+                                playback.actualPlaying = true
                                 playback.ready = true
                                 playback.buffering = false
                                 playback.report()
                             }
-                            PlayerConstants.PlayerState.PAUSED -> { playback.buffering = false; playback.report() }
-                            PlayerConstants.PlayerState.ENDED -> session.playback("pause")
+                            PlayerConstants.PlayerState.PAUSED -> { playback.actualPlaying = false; playback.buffering = false; playback.report() }
+                            PlayerConstants.PlayerState.ENDED -> { playback.actualPlaying = false; session.playback("pause") }
                             else -> Unit
                         }
                     }
                     override fun onCurrentSecond(player: YouTubePlayer, second: Float) {
+                        if (!active) { return }
                         val newPosition = (second * 1000).toLong()
                         playback.position = newPosition
                     }
-                    override fun onVideoDuration(player: YouTubePlayer, duration: Float) { playback.duration = (duration * 1000).toLong() }
+                    override fun onVideoDuration(player: YouTubePlayer, duration: Float) {
+                        if (!active) { return }
+                        playback.duration = (duration * 1000).toLong()
+                    }
                     override fun onError(player: YouTubePlayer, error: PlayerConstants.PlayerError) {
+                        if (!active) { return }
                         playback.ready = false; playback.error = "YouTube could not play this video ($error). It may restrict embedding or require access in YouTube."; playback.report()
                     }
                 }, IFramePlayerOptions.Builder(context).controls(0).fullscreen(0).build())
-                onDispose { lifecycle.lifecycle.removeObserver(view); view.release() }
+                onDispose { active = false; lifecycle.lifecycle.removeObserver(view); view.release() }
             }
             AndroidView(factory = { view }, modifier = modifier.background(Color.Black).heightIn(min = 200.dp))
         } else {
-            val source = localSource ?: when (media.kind) {
+            val source = localSource ?: (if (media.kind == "relay") session.localSharedSource(media.source) else null) ?: when (media.kind) {
+                "relay" -> session.sharedFileUrl(media.source)
                 "upload" -> session.uploadUrl(media.source)
                 "stream" -> media.source
                 else -> null
@@ -135,8 +153,8 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
             if (source != null) {
                 val player = remember {
                     ExoPlayer.Builder(context).apply {
-                        if (media.kind == "upload") setMediaSourceFactory(
-                            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(session.uploadDataSource())
+                        if (media.kind in setOf("upload", "relay")) setMediaSourceFactory(
+                            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(androidx.media3.datasource.DefaultDataSource.Factory(context, session.uploadDataSource()))
                         )
                     }.build().apply {
                         setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, false)
@@ -146,6 +164,7 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                     playback.seek = { player.seekTo(it) }
                     playback.play = { player.playWhenReady = it }
                     player.addListener(object : Player.Listener {
+                        override fun onIsPlayingChanged(isPlaying: Boolean) { playback.actualPlaying = isPlaying }
                         override fun onPlaybackStateChanged(state: Int) {
                             playback.ready = state == Player.STATE_READY || state == Player.STATE_BUFFERING && playback.ready
                             playback.buffering = state == Player.STATE_BUFFERING
@@ -169,7 +188,7 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                 }
                 AndroidView(factory = { PlayerView(context).apply { this.player = player; useController = false } },
                     modifier = modifier.background(Color.Black))
-            } else Surface(modifier) { Text("Ask your partner to reselect the file using Share local MP4.", Modifier.padding(24.dp)) }
+            } else Surface(modifier) { Text("Ask the source phone to select and share this video again.", Modifier.padding(24.dp)) }
         }
     }
     LaunchedEffect(room.connected, playback.ready, media.id) {
