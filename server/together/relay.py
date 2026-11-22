@@ -3,10 +3,12 @@ import asyncio
 import base64
 import re
 import secrets
+from collections import deque
 from dataclasses import dataclass
 from aiohttp import web
 
 CHUNK = 128 * 1024
+READ_AHEAD = 4
 MAX_FILE = 20 * 1024**3
 
 
@@ -124,17 +126,24 @@ class FileRelay:
             return response
         self.readers += 1
         prepared = False
+        offsets = iter(range(start, end + 1, CHUNK))
+        in_flight = deque()
         try:
-            offset = start
-            while offset <= end:
+            while True:
                 if request.transport is None or request.transport.is_closing():
                     break
-                chunk = await self.fetch(room, share, identifier, offset, min(CHUNK, end - offset + 1))
+                # Overlap source round trips, but only refill the window after writing to the receiver.
+                while len(in_flight) < READ_AHEAD and (offset := next(offsets, None)) is not None:
+                    length = min(CHUNK, end - offset + 1)
+                    in_flight.append(asyncio.create_task(self.fetch(room, share, identifier, offset, length)))
+                if not in_flight:
+                    break
+                chunk = await in_flight[0]
+                in_flight.popleft()
                 if not prepared:
                     await response.prepare(request)
                     prepared = True
-                await response.write(chunk)  # Await downstream backpressure before requesting another chunk.
-                offset += len(chunk)
+                await response.write(chunk)
             if prepared:
                 await response.write_eof()
             return response
@@ -145,6 +154,10 @@ class FileRelay:
                 request.transport.close()  # Preserve Content-Length; never pretend a truncated movie completed.
             return response
         finally:
+            for task in in_flight:
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
             self.readers -= 1
 
     def disconnected(self, member):

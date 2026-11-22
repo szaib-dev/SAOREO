@@ -1,0 +1,3 @@
+<resources>
+    <item type="drawable" name="media3_notification_small_icon">@drawable/ic_app_notification</item>
+</resources>

@@ -305,8 +305,7 @@ internal fun ConversionTools(app: SaoreoApp, modifier: Modifier) {
 
 @Composable
 private fun Mark() {
-    Image(painterResource(R.drawable.mark), null, Modifier.size(37.dp)
-        .background(Color(0xff302743), RoundedCornerShape(12.dp)))
+    Image(painterResource(R.drawable.mark), null, Modifier.size(37.dp))
 }
 
 @Composable
@@ -567,10 +566,22 @@ internal val LocalPickerVisibility = staticCompositionLocalOf<(Boolean) -> Unit>
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> ChoiceMenu(label: String, options: List<T>, text: (T) -> String, onSelect: (T) -> Unit) {
+    ChoiceMenu(label, options, text, icon = null, onSelect = onSelect)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun <T> ChoiceMenu(
+    label: String, options: List<T>, text: (T) -> String, @androidx.annotation.DrawableRes icon: Int?,
+    sheetTitle: String = "Choose an option", active: Boolean = false, onSelect: (T) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
     val notifyExpanded = LocalPickerVisibility.current
     DisposableEffect(expanded) { notifyExpanded(expanded); onDispose { if (expanded) notifyExpanded(false) } }
-    TextButton({ expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    if (icon != null) IconButton({ expanded = true }) {
+        Icon(painterResource(icon), label, Modifier.size(23.dp),
+            tint = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+    } else TextButton({ expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
         modifier = Modifier.heightIn(min = 40.dp)) {
         Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge, overflow = TextOverflow.Ellipsis)
         Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
@@ -578,7 +589,7 @@ fun <T> ChoiceMenu(label: String, options: List<T>, text: (T) -> String, onSelec
     if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 4.dp)) {
-            Text("Choose an option", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(bottom = 12.dp))
+            Text(sheetTitle, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(bottom = 12.dp))
             androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)) {
                 items(options.size) { index ->

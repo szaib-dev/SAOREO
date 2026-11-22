@@ -18,7 +18,6 @@ import android.os.StatFs
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -172,9 +171,18 @@ class ConversionService : Service() {
             else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         notifications.createNotificationChannel(NotificationChannel(CHANNEL, "Audio conversions", NotificationManager.IMPORTANCE_LOW))
         try {
-            ServiceCompat.startForeground(this, NOTICE, notification(initial), type)
-        } catch (_: Exception) {
-            state.status.value = initial.copy(active = false, stage = "Android blocked background conversion.", ended = SystemClock.elapsedRealtime())
+            val notice = notification(initial)
+            if (Build.VERSION.SDK_INT >= 35) {
+                try {
+                    startForeground(NOTICE, notice, type)
+                } catch (unsupported: IllegalArgumentException) {
+                    // Some platform builds only accept dataSync for local file processing.
+                    startForeground(NOTICE, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                }
+            } else startForeground(NOTICE, notice, type)
+        } catch (failure: Exception) {
+            android.util.Log.w("SAOREO-Conversion", "Foreground promotion failed", failure)
+            state.status.value = initial.copy(active = false, stage = "Android couldn't start conversion. Keep SAOREO open and try again.", ended = SystemClock.elapsedRealtime())
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -371,7 +379,7 @@ class ConversionService : Service() {
         val cancel = Intent(this, ConversionService::class.java).setAction(CANCEL)
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         return Notification.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_app_notification)
             .setContentTitle(status.title).setContentText(status.stage)
             .setContentIntent(PendingIntent.getActivity(this, 0, open, flags))
             .setOnlyAlertOnce(true).setAutoCancel(!status.active).setOngoing(status.active).apply {

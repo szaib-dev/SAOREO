@@ -2,11 +2,15 @@ package com.codetic.saoreo
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -73,10 +77,11 @@ internal fun SectionHeading(title: String, action: String? = null, onAction: () 
 
 /** Original vector artwork also gives imported tracks without a cover an intentional identity. */
 @Composable
-internal fun RecordArt(modifier: Modifier = Modifier, seed: Int = 0) {
+internal fun RecordArt(modifier: Modifier = Modifier, seed: Int = 0,
+                       shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(22.dp)) {
     val palette = listOf(Lavender, Lime, Color(0xffecb8cb), Color(0xffa8d6cf))
     val color = palette[Math.floorMod(seed, palette.size)]
-    Canvas(modifier.clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(color, color.copy(alpha = .55f))))) {
+    Canvas(modifier.clip(shape).background(Brush.linearGradient(listOf(color, color.copy(alpha = .55f))))) {
         val radius = size.minDimension * .48f
         val center = Offset(size.width * .58f, size.height * .53f)
         drawCircle(Ink, radius, center)
@@ -114,9 +119,30 @@ internal fun CollectionCard(title: String, subtitle: String, color: Color, modif
     }
 }
 
-private enum class Destination(val label: String, val icon: ImageVector) {
-    HOME("Home", Icons.Outlined.Home), MUSIC("Music", Icons.Outlined.FavoriteBorder),
-    DOWNLOADS("Downloads", Icons.Outlined.Download), STUDIO("Studio", Icons.Outlined.Build),
+private enum class Destination(val label: String, @DrawableRes val icon: Int) {
+    HOME("Home", R.drawable.ic_nav_home),
+    MUSIC("Music", R.drawable.ic_nav_music),
+    DOWNLOADS("Downloads", R.drawable.ic_nav_downloads),
+    STUDIO("Studio", R.drawable.ic_nav_studio),
+}
+
+@Composable
+private fun RowScope.ShellTab(label: String, @DrawableRes icon: Int, selected: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val indicator by animateColorAsState(if (selected) scheme.primaryContainer else Color.Transparent, label = "Tab background")
+    val tint by animateColorAsState(if (selected) scheme.onPrimaryContainer else scheme.onSurfaceVariant, label = "Tab icon")
+    val indicatorWidth by animateDpAsState(if (selected) 50.dp else 36.dp, tween(220), label = "Tab selection")
+    Column(Modifier.weight(1f).heightIn(min = 64.dp).clip(RoundedCornerShape(15.dp))
+        .selectable(selected, role = Role.Tab, onClick = onClick).padding(top = 5.dp, bottom = 3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)) {
+        Box(Modifier.widthIn(max = indicatorWidth).fillMaxWidth(.9f).height(31.dp).background(indicator, CircleShape),
+            contentAlignment = Alignment.Center) {
+            Icon(painterResource(icon), null, Modifier.size(23.dp), tint)
+        }
+        Text(label, color = if (selected) scheme.onSurface else scheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -145,18 +171,13 @@ internal fun SaoreoShell(app: SaoreoApp, settings: Settings, shortcutEvents: Int
         topBar = {
             if (!keyboardVisible) Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                if (page != null) FilledTonalIconButton({ page = null }) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back")
-                } else Surface(shape = CircleShape, color = Lime, modifier = Modifier.size(30.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(painterResource(R.drawable.ic_music_note), null, Modifier.size(21.dp), Ink)
-                    }
-                }
-                Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                    Text(page ?: if (destination == Destination.HOME) "SAOREO" else destination.label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                if (page == null) Image(painterResource(R.drawable.mark), null, Modifier.size(32.dp))
+                Column(Modifier.weight(1f).padding(start = if (page == null) 10.dp else 0.dp)) {
+                    Text(page ?: if (destination == Destination.HOME) "SAOREO" else destination.label,
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
                 if (page == null && destination == Destination.DOWNLOADS) {
-                    IconButton({ search = !search }) { Icon(Icons.Outlined.Search, "Search downloads") }
+                    IconButton({ search = !search }) { Icon(painterResource(R.drawable.ic_ui_search), "Search downloads") }
                     Box {
                         IconButton({ overflow = true }) { Icon(Icons.Outlined.MoreVert, "Download options") }
                         DropdownMenu(overflow, { overflow = false }) {
@@ -165,26 +186,29 @@ internal fun SaoreoShell(app: SaoreoApp, settings: Settings, shortcutEvents: Int
                         }
                     }
                 }
-                if (page != "Settings") FilledTonalIconButton({ page = "Settings" }) { Icon(Icons.Outlined.Settings, "Settings") }
+                if (page != "Settings") IconButton({ page = "Settings" }) { Icon(painterResource(R.drawable.ic_ui_settings), "Settings", Modifier.size(21.dp)) }
             }
         }, bottomBar = {
-            if (page == null && !keyboardVisible) Column(Modifier.navigationBarsPadding().animateContentSize()) {
-                MusicMiniPlayer(app, player) { context.startActivity(MusicActivity.open(context, nowPlaying = true)) }
-                Surface(Modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth(),
-                    shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    Row(Modifier.selectableGroup().padding(4.dp)) {
-                        Destination.entries.forEach { item ->
-                            val selected = destination == item
-                            val color by animateColorAsState(if (selected) Lime else Color.Transparent, label = "Navigation")
-                            Column(Modifier.weight(1f).clip(RoundedCornerShape(26.dp)).background(color)
-                                .selectable(selected, role = Role.Tab, onClick = {
-                                    destination = item; search = false; activity = false
-                                }).padding(vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                val tint = if (selected) Ink else MaterialTheme.colorScheme.onSurfaceVariant
-                                if (item == Destination.MUSIC) Icon(painterResource(R.drawable.ic_music_note), null, Modifier.size(22.dp), tint)
-                                else Icon(item.icon, null, Modifier.size(22.dp), tint)
-                                Text(item.label, color = tint, style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1, modifier = Modifier.padding(top = 3.dp))
+            if (!keyboardVisible) Column(Modifier.fillMaxWidth().animateContentSize()) {
+                if (page == null) MusicMiniPlayer(app, player) { context.startActivity(MusicActivity.open(context, nowPlaying = true)) }
+                Surface(shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 2.dp) {
+                    Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars
+                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))) {
+                        if (page == null) Row(Modifier.fillMaxWidth().selectableGroup().padding(horizontal = 5.dp, vertical = 3.dp)) {
+                            Destination.entries.forEach { item ->
+                                ShellTab(item.label, item.icon, destination == item) {
+                                    if (destination != item) { destination = item; search = false; activity = false }
+                                }
+                                if (item == Destination.MUSIC) ShellTab("Together", R.drawable.ic_nav_together, false) {
+                                    context.startActivity(TogetherGames.roomIntent(context))
+                                }
+                            }
+                        } else Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                            TextButton({ page = null }) {
+                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Back")
                             }
                         }
                     }
@@ -193,8 +217,14 @@ internal fun SaoreoShell(app: SaoreoApp, settings: Settings, shortcutEvents: Int
         }) { inner ->
         AnimatedContent(targetState = page?.let { "page:$it" } ?: "tab:${destination.name}",
             modifier = Modifier.fillMaxSize().padding(inner).consumeWindowInsets(inner).imePadding(),
-            transitionSpec = { (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 12 }) togetherWith
-                (fadeOut(tween(110)) + slideOutHorizontally(tween(180)) { -it / 18 }) }, label = "Screen transition") { route ->
+            transitionSpec = {
+                val oldTab = Destination.entries.indexOfFirst { initialState == "tab:${it.name}" }
+                val newTab = Destination.entries.indexOfFirst { targetState == "tab:${it.name}" }
+                val forward = if (oldTab >= 0 && newTab >= 0) newTab > oldTab else newTab < 0
+                val direction = if (forward) 1 else -1
+                (fadeIn(tween(225, delayMillis = 25)) + slideInHorizontally(tween(270, easing = FastOutSlowInEasing)) { direction * it / 14 }) togetherWith
+                    (fadeOut(tween(150)) + slideOutHorizontally(tween(230, easing = FastOutSlowInEasing)) { -direction * it / 22 })
+            }, label = "Screen transition") { route ->
             val shownPage = route.takeIf { it.startsWith("page:") }?.substringAfter(':')
             val shownTab = route.takeIf { it.startsWith("tab:") }?.substringAfter(':')?.let(Destination::valueOf) ?: destination
             when (shownPage) {
@@ -222,10 +252,7 @@ internal fun SaoreoShell(app: SaoreoApp, settings: Settings, shortcutEvents: Int
     if (adding) ModalBottomSheet(onDismissRequest = { adding = false }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding()
             .padding(start = 24.dp, end = 24.dp, bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Eyebrow("SAVE SOMETHING GOOD")
-            Text("Your next favorite.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text("Paste a video or playlist link. Keep the video, or save the audio to your music library.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+            Text("Save from a link", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             LinkPanel(app, settings, input, onInput = { input = it }, onQueued = {
                 adding = false; destination = Destination.DOWNLOADS; activity = true; input = ""
             })
@@ -247,20 +274,14 @@ private fun HomeHub(app: SaoreoApp, settings: Settings, add: () -> Unit, music: 
     LaunchedEffect(editingLink) { if (editingLink) scroll.animateScrollTo(0) }
     Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        AnimatedVisibility(!editingLink, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-            Column(Modifier.padding(top = 12.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Keep something good.", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text("Videos to watch. Music to keep.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
         LinkInput(app, settings, Modifier.fillMaxWidth(), onQueued = downloads, onEditing = { editingLink = it })
-        if (!editingLink) Surface(Modifier.fillMaxWidth().clickable { context.startActivity(Intent(context, TogetherActivity::class.java)) },
-            shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+        if (!editingLink) Surface(Modifier.fillMaxWidth().clickable { context.startActivity(TogetherGames.roomIntent(context)) },
+            shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Icon(painterResource(R.drawable.ic_together), null, Modifier.size(28.dp))
+                Icon(painterResource(R.drawable.ic_nav_together), null, Modifier.size(28.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Better, together.", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                    Text("Watch. Talk. Be there.", style = MaterialTheme.typography.bodySmall)
+                    Text("Together", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+                    Text("Call or watch with your partner", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "Open Together")
             }
@@ -269,8 +290,8 @@ private fun HomeHub(app: SaoreoApp, settings: Settings, add: () -> Unit, music: 
         Surface(shape = RoundedCornerShape(24.dp), color = Lavender, modifier = Modifier.fillMaxWidth().clickable { music("Songs") }) {
             Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("A soundtrack of your own.", color = Ink, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-                    Text("Save your favorites. Listen anywhere.", color = Ink.copy(alpha = .75f), style = MaterialTheme.typography.bodySmall)
+                    Text("Music library", color = Ink, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                    Text("Songs, favorites, and playlists", color = Ink.copy(alpha = .75f), style = MaterialTheme.typography.bodySmall)
                 }
                 WaveArt(Modifier.size(80.dp, 64.dp))
             }
@@ -287,7 +308,7 @@ private fun HomeHub(app: SaoreoApp, settings: Settings, add: () -> Unit, music: 
                 Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "View activity")
             }
         }
-        SectionHeading("Made by you", "Your library") { music("Songs") }
+        SectionHeading("Your collections", "Open library") { music("Songs") }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             CollectionCard("Liked songs", "${states.count { it.liked }} favorites", Lime, Modifier.weight(1f)) { music("Liked") }
             CollectionCard("Your playlists", "${playlists.size} collections", Color(0xffb9d7d2), Modifier.weight(1f)) { music("Playlists") }
@@ -295,9 +316,7 @@ private fun HomeHub(app: SaoreoApp, settings: Settings, add: () -> Unit, music: 
         SectionHeading("Recently added", if (recentVideos.isNotEmpty()) "See all" else null, add)
         if (recentVideos.isEmpty()) Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Your next watch starts here.", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("Your recently downloaded videos will appear here.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                Text("No downloaded videos yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 TextButton(add, contentPadding = PaddingValues(0.dp)) { Text("Open Downloads"); Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null) }
             }
         } else recentVideos.take(5).forEach { song ->
@@ -321,17 +340,15 @@ private fun HomeHub(app: SaoreoApp, settings: Settings, add: () -> Unit, music: 
 private fun StudioHub(open: (String) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        PageHeading("A little extra.", "Make more of the media you keep.")
         StudioCard("Convert media", "Extract MP3 audio or turn an MP3 into an MP4 video.",
             Icons.Outlined.PlayArrow, Lavender) { open("Convert media") }
         StudioCard("Transcript", "Read, copy, and export the words that matter.",
             Icons.Outlined.ContentPaste, Lime) { open("Transcript") }
         StudioCard("Status", "Keep photos and videos from your local WhatsApp status folders.",
             Icons.Outlined.PhotoLibrary, Color(0xffb9d7d2)) { open("Status") }
-        SectionHeading("Make yourself at home")
         Surface(Modifier.fillMaxWidth().clickable { open("Settings") }, shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surfaceContainer) {
-            ListItem(headlineContent = { Text("Settings & preferences") }, leadingContent = { Icon(Icons.Outlined.Settings, null) },
+            ListItem(headlineContent = { Text("Settings & preferences") }, leadingContent = { Icon(painterResource(R.drawable.ic_ui_settings), null) },
                 trailingContent = { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null) },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent))
         }

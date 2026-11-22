@@ -74,6 +74,13 @@ data class MediaLink(val url: String, val source: Source) {
             }
             if (!supportedPath) return null
             val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+            if (source == Source.INSTAGRAM) {
+                val media = setOf("p", "reel", "reels", "tv")
+                val canonicalParts = if (sections.size == 3 && sections[0] != "share" && sections[1] in media)
+                    sections.drop(1) else sections
+                val canonical = if (canonicalParts.first() == "reels") listOf("reel", canonicalParts[1]) else canonicalParts
+                return MediaLink("https://www.instagram.com/${canonical.joinToString("/")}/$query", source)
+            }
             return MediaLink("https://$host$path$query", source)
         }
     }

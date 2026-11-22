@@ -27,7 +27,7 @@ private fun InputStream.beginsWithErrorDocument(): Boolean {
         text.startsWith("#extm3u") || text.startsWith("http/1.") || text.startsWith("http/2 ")
 }
 
-internal fun hasCompleteMp4Boxes(file: File): Boolean = java.io.RandomAccessFile(file, "r").use { input ->
+internal fun hasCompleteMp4Boxes(file: File, allowFragments: Boolean = true): Boolean = java.io.RandomAccessFile(file, "r").use { input ->
     val length = input.length()
     var offset = 0L
     var foundMedia = false
@@ -46,6 +46,7 @@ internal fun hasCompleteMp4Boxes(file: File): Boolean = java.io.RandomAccessFile
             else -> declared
         }
         if (size < headerBytes || size > remaining) return@use false
+        if (!allowFragments && type == 0x6d6f6f66) return@use false // moof
         if (type == 0x6d646174 && size > headerBytes) foundMedia = true // mdat
         if (type == 0x6d6f6f76 && size > headerBytes) foundIndex = true // moov
         offset += size

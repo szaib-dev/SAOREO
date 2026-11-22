@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from aiohttp import web, WSMsgType
+from pairing import Pairing
 from relay import FileRelay
+from games import Games
 
 def now():
     return int(time.time() * 1000)
@@ -66,6 +68,8 @@ class Member:
     protocol: int = 1
     last_seq: int = 0
     last_seen: int = field(default_factory=now)
+    slow_connection: bool | None = None
+    game_client: bool = False
 
 @dataclass
 class Room:
@@ -107,12 +111,13 @@ class Room:
         return dict(type='state', room=self.id, revision=self.revision, serverTime=stamp,
                     position=self.position_at(stamp), playing=self.playing, wanted=self.wanted,
                     wait=self.wait, callFullscreen=self.call_fullscreen, media=self.media, queue=self.queue, request=self.request,
+                    autoAdvanceQueue=True,
                     members=[dict(id=m.id, name=m.name, ordinal=m.ordinal, online=m.ws is not None,
                                   ready=m.ready, buffering=m.buffering, call=m.call, mic=m.mic,
-                                  camera=m.camera) for m in self.members.values()])
+                                  camera=m.camera, slowConnection=m.slow_connection) for m in self.members.values()])
 
 class Together:
-    def __init__(self, key=None, turn_secret=None, turn_host=None):
+    def __init__(self, key=None, turn_secret=None, turn_host=None, pair_db=':memory:'):
         self.key = key or os.environ.get('TOGETHER_ACCESS_KEY', '')
         if len(self.key) < 16:
             raise RuntimeError('Set TOGETHER_ACCESS_KEY to a random private deployment key')
@@ -124,6 +129,8 @@ class Together:
         self.upload_lock = asyncio.Lock()
         self.upload_dir = None
         self.relay = FileRelay(self)
+        self.pairing = Pairing(self, pair_db)
+        self.games = Games(self)
 
     def authenticate_media(self, request):
         room = self.rooms.get(request.match_info['room'])
@@ -226,15 +233,39 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
         return dict(room=room.id, token=member.token, member=member.id,
                     invite=room.id + '.' + room.invitation, iceServers=self.ice(member))
 
+    def new_room(self):
+        if len(self.rooms) >= 8:
+            raise web.HTTPServiceUnavailable(text='All private rooms are occupied')
+        room = Room(secrets.token_hex(6), secrets.token_urlsafe(24))
+        self.rooms[room.id] = room
+        return room
+
+    def paired_watch_host(self, room_id, token):
+        room = self.rooms.get(str(room_id))
+        host = next(iter(room.members.values()), None) if room else None
+        if not host or not host.ws or not hmac.compare_digest(host.token.encode(), str(token).encode()):
+            raise ValueError('Open your own watch room to invite your partner')
+        if len(room.members) != 1:
+            raise ValueError('This watch room already has a partner slot in use')
+        return room, host
+
+    def paired_room(self, caller, recipient, room_id=None, host_id=None):
+        if room_id:
+            room = self.rooms.get(room_id)
+            host = room.members.get(host_id) if room else None
+            if not host or not host.ws or len(room.members) != 1:
+                raise ValueError('The watch room is no longer available')
+        else:
+            room = self.new_room()
+            host = self.member(room, caller)
+        return [self.ticket(room, host), self.ticket(room, self.member(room, recipient))]
+
     async def create(self, request):
         self.limit(('create', self.ip(request)), 10, 300)
         data = await request.json()
         if not hmac.compare_digest(str(data.get('key', '')), self.key):
             raise web.HTTPUnauthorized(text='Incorrect server access key')
-        if len(self.rooms) >= 8:
-            raise web.HTTPServiceUnavailable(text='All private rooms are occupied')
-        room = Room(secrets.token_hex(6), secrets.token_urlsafe(24))
-        self.rooms[room.id] = room
+        room = self.new_room()
         return web.json_response(self.ticket(room, self.member(room, data.get('name', ''))))
 
     async def join(self, request):
@@ -260,11 +291,22 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
     async def command(self, room, m, data):
         op = data.get('type')
         room.updated = m.last_seen = now()
+        if op == 'game':
+            try:
+                self.limit(('game', room.id, m.id), 58, 4)
+                await self.games.command(room, m, data)
+            except (ValueError, TypeError, KeyError, web.HTTPException) as error:
+                await m.ws.send_json(dict(type='gameError', message=str(error)[:180]))
+            return
         if op == 'fileChunk':
             await self.relay.chunk(room, m, data)
             return
         if op == 'ping':
             await m.ws.send_json(dict(type='pong', sent=data.get('sent'), serverTime=now()))
+            slow = data.get('slowConnection')
+            if type(slow) is bool and slow != m.slow_connection:
+                m.slow_connection = slow
+                await self.broadcast(room, dict(type='network', member=m.id, slow=slow))
             return
         if op == 'signal':
             payload = data.get('payload')
@@ -309,7 +351,11 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             await self.broadcast(room, ring)
             await self.broadcast(room, room.snapshot())
             return
-        if op in ('play', 'pause', 'seek', 'media', 'queueAdd', 'queueSelect', 'queueRemove', 'wait', 'resetPartner'):
+        if op == 'finished' and (
+            not room.media or room.media['id'] != data.get('mediaId') or not room.wanted or room.media.get('live')
+        ):
+            return
+        if op in ('play', 'pause', 'seek', 'finished', 'media', 'queueAdd', 'queueSelect', 'queueRemove', 'wait', 'resetPartner'):
             seq = int(number(data.get('seq', 0), high=2**53))
             if seq <= m.last_seq:
                 await m.ws.send_json(room.snapshot())
@@ -351,6 +397,17 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             else:
                 if len(room.queue) >= 20: raise ValueError('Queue is full')
                 room.queue.append(item)
+        elif op == 'finished':
+            room.wanted = bool(room.queue)
+            if room.wanted:
+                room.media = room.queue.pop(0)
+                room.position = 0
+                for member in room.members.values():
+                    member.ready = False
+                    member.buffering = False
+            else:
+                for member in room.members.values():
+                    member.buffering = False
         elif op == 'queueSelect':
             item = next((x for x in room.queue if x['id'] == data.get('id')), None)
             if not item: raise ValueError('Queue item is no longer available')
@@ -425,15 +482,19 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                 return ws
             if member.ws is not None: await member.ws.close(code=4000, message=b'Reconnected')
             member.ws = ws; member.last_seq = 0; member.ready = False; member.buffering = False
+            member.game_client = hello.get('games') == 1
+            member.slow_connection = None
             room.settle()
             await ws.send_json(dict(type='history', messages=list(room.chat)))
             await self.broadcast(room, room.snapshot())
+            await self.games.sync(room, member)
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT: break
                 try:
                     data = json.loads(msg.data)
                     if not isinstance(data, dict): raise ValueError('Invalid message')
-                    self.limit(('chunks' if data.get('type') == 'fileChunk' else 'member', room.id, member.id), 400 if data.get('type') == 'fileChunk' else 160, 10)
+                    if data.get('type') != 'game':
+                        self.limit(('chunks' if data.get('type') == 'fileChunk' else 'member', room.id, member.id), 400 if data.get('type') == 'fileChunk' else 160, 10)
                     await self.command(room, member, data)
                 except (ValueError, TypeError, KeyError, web.HTTPException) as ex:
                     await ws.send_json(dict(type='error', message=str(ex)[:180]))
@@ -444,6 +505,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                 self.relay.disconnected(member)
                 room.call_fullscreen = False
                 member.ws = None; member.ready = False; member.call = member.mic = member.camera = False
+                member.slow_connection = None
                 if room and room.id in self.rooms:
                     room.request = None
                     room.wanted = False
@@ -467,9 +529,11 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                         self.uploads.pop(identifier)
                         path.unlink(missing_ok=True)
         task = asyncio.create_task(loop())
+        games = asyncio.create_task(self.games.run())
         yield
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        games.cancel()
+        await asyncio.gather(task, games, return_exceptions=True)
         for room in list(self.rooms.values()):
             for m in room.members.values():
                 if m.ws is not None: await m.ws.close(code=1001)
@@ -477,7 +541,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
 
     def app(self):
         async def health(request):
-            return web.json_response(dict(status='ok', version='1.1', protocol=3, features=['rangeRelay', 'sharedFullCall']))
+            return web.json_response(dict(status='ok', version='1.2', protocol=3, features=['rangeRelay', 'sharedFullCall', 'pairing']))
         async def asset_links(request):
             return web.json_response([{
                 'relation': ['delegate_permission/common.handle_all_urls'],
@@ -512,7 +576,9 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
         app.router.add_get('/together/share/{room}/{id}', self.relay.read)
         app.router.add_get('/together/ws', self.socket)
         app.cleanup_ctx.append(self.cleanup)
+        self.pairing.routes(app)
         return app
 
 if __name__ == '__main__':
-    web.run_app(Together().app(), host='127.0.0.1', port=8770, access_log=None, print=None)
+    database = os.environ.get('TOGETHER_PAIR_DB', 'pairs.sqlite3')
+    web.run_app(Together(pair_db=database).app(), host='127.0.0.1', port=8770, access_log=None, print=None, handler_cancellation=True)

@@ -34,9 +34,15 @@ class CollectionStorageTest {
                 dao.add(PlaylistTrack("easy", song.id))
                 dao.add(PlaylistTrack("easy", song.id))
                 dao.add(PlaylistTrack("heavy", song.id))
+                assertEquals(listOf("easy", "heavy"), dao.orderedPlaylistIds())
+                dao.setPlaylistPosition("heavy", 0)
+                dao.setPlaylistPosition("easy", 1)
             }
             withDb { db ->
                 val dao = db.collections()
+                assertEquals(listOf("heavy", "easy"), dao.playlists().first().map { it.id })
+                dao.insert(MusicPlaylist("new", "A New Playlist"))
+                assertEquals(listOf("heavy", "easy", "new"), dao.orderedPlaylistIds())
                 assertEquals("Gym / Chest", folderLabel(dao.folders().first(), db.downloads().find(song.id)?.folder))
                 assertEquals(2, dao.tracks().first().size)
                 assertEquals(listOf(song.galleryUri), db.downloads().audio().first().map { it.galleryUri })

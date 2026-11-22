@@ -65,7 +65,7 @@ class TranscriptService : Service() {
         val view = Intent(this, MainActivity::class.java).setAction(MainActivity.OPEN_TRANSCRIPT)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val cancel = PendingIntent.getService(this, ID, Intent(this, TranscriptService::class.java).setAction(CANCEL), flags)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_download)
+        return Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_app_notification)
             .setContentTitle("SAOREO Transcript").setContentText(text).setOnlyAlertOnce(true)
             .setContentIntent(PendingIntent.getActivity(this, ID, view, flags))
             .setProgress(100, progress ?: 0, progress == null).setOngoing(true)

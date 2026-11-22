@@ -267,7 +267,9 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         suspend fun downloadSource(): File {
             val instagramStream = choice.reusableStreams.singleOrNull()?.takeIf {
-                link.source == Source.INSTAGRAM && !choice.audioOnly && choice.extension == "mp4" && it.extension == "mp4"
+                link.source == Source.INSTAGRAM && !choice.audioOnly && choice.extension == "mp4" && it.extension == "mp4" &&
+                    !it.id.startsWith("dash-", ignoreCase = true) &&
+                    it.videoCodec?.startsWith("avc1") == true && it.audioCodec?.startsWith("mp4a") == true
             }
             if (instagramStream != null) {
                 try {

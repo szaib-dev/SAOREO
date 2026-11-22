@@ -12,20 +12,30 @@ import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+internal fun instagramVideoFormats(requireAudio: Boolean): List<String> {
+    val progressive = "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]/best[ext=mp4]/best"
+    val separate = "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio"
+    val silent = if (requireAudio) "" else "/bestvideo[ext=mp4][vcodec^=avc1]/bestvideo"
+    return listOf("$progressive/$separate$silent", "$separate/$progressive$silent")
+}
+
 /** Instagram can serve valid MP4 containers Android cannot read until remuxed or transcoded. */
 internal suspend fun prepareInstagramVideo(context: Context, input: File, requireAudio: Boolean): File {
-    try {
-        withContext(Dispatchers.IO) { verifyDownloadedMedia(input, "video/mp4", requireAudio) }
-        return input
-    } catch (_: InvalidMediaException) { /* Keep the original until a verified replacement exists. */ }
-    if (withContext(Dispatchers.IO) { !input.isFile || input.length() == 0L || beginsWithErrorDocument(input) })
-        throw InvalidMediaException()
+    val playable = withContext(Dispatchers.IO) {
+        if (!input.isFile || input.length() == 0L || beginsWithErrorDocument(input)) throw InvalidMediaException()
+        try {
+            verifyDownloadedMedia(input, "video/mp4", requireAudio)
+            true
+        } catch (_: InvalidMediaException) { false }
+    }
+    if (playable && withContext(Dispatchers.IO) { hasCompleteMp4Boxes(input, allowFragments = false) }) return input
     withContext(Dispatchers.IO) { FFmpeg.init(context) }
     val executable = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
     val libraries = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
     val output = File(input.parentFile, "instagram-normalized.mp4")
     try {
-        for (transcode in listOf(false, true)) {
+        // Flatten a working fragmented MP4 with a stream copy. A rejected input can also need re-encoding.
+        for (transcode in if (playable) listOf(false) else listOf(false, true)) {
             output.delete()
             val codecs = if (transcode) listOf("-c:v", "libx264", "-threads", "2", "-preset", "veryfast",
                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k") else listOf("-c", "copy")
@@ -60,6 +70,7 @@ internal suspend fun prepareInstagramVideo(context: Context, input: File, requir
             if (!output.renameTo(input)) throw IOException("Could not stage the prepared Instagram video.")
             return input
         }
+        if (playable) return input
         throw InvalidMediaException()
     } finally { output.delete() }
 }

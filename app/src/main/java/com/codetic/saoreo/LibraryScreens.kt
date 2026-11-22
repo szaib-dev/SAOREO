@@ -251,9 +251,11 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                             val model = if (canOpen) {
                                 if (isImage) uri else if (video) videoThumb(context, uri) else null
                             } else item.thumbnail
-                            Row(Modifier.weight(1f).then(if (canOpen) Modifier.clickable(
-                                onClickLabel = if (video || audio) "Play" else "Open", onClick = ::open,
-                            ) else Modifier), horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            Row(Modifier.weight(1f).combinedClickable(
+                                onClickLabel = if (!canOpen) "Download actions" else if (video || audio) "Play" else "Open",
+                                onClick = { if (canOpen) open() else menu = true },
+                                onLongClickLabel = "Download actions", onLongClick = { menu = true },
+                            ), horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 if (audio) RecordArt(Modifier.size(58.dp), item.id.hashCode())
                                 else Thumb(model, Modifier.size(64.dp, 48.dp).clip(RoundedCornerShape(10.dp)))
@@ -280,6 +282,11 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                         DropdownMenuItem(text = { Text("Cancel") }, onClick = execute { act { app.downloads.cancel(item) } })
                                     }
                                     else {
+                                        if (uri != null && available && source != Source.IMPORTED) {
+                                            DropdownMenuItem(text = { Text("Delete file") },
+                                                leadingIcon = { Icon(Icons.Outlined.Delete, null) },
+                                                onClick = execute { confirmation = item })
+                                        }
                                         if (uri != null && available) {
                                             DropdownMenuItem(text = { Text(if (video || audio) "Play" else "Open") }, onClick = execute(::open))
                                             if (video) DropdownMenuItem(text = { Text("Convert to MP3") },
@@ -289,7 +296,6 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                             DropdownMenuItem(text = { Text("Share") }, onClick = execute { showMedia(context, uri, mime, true) })
                                             if (source != Source.IMPORTED) {
                                                 DropdownMenuItem(text = { Text("Rename file") }, onClick = execute { renameFile = item })
-                                                DropdownMenuItem(text = { Text("Delete file") }, onClick = execute { confirmation = item })
                                             }
                                         }
                                         if (item.state in setOf("FAILED", "CANCELLED", "PAUSED") && MediaLink.parse(item.url) != null) {
@@ -307,7 +313,8 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                         if (settings.folderOrganization)
                                             DropdownMenuItem(text = { Text("Move to folder") }, onClick = execute { move = item })
                                         DropdownMenuItem(text = { Text("File details") }, onClick = execute { fileDetails = item })
-                                        DropdownMenuItem(text = { Text(if (libraryVideos) "Remove from library" else "Remove from history") },
+                                        DropdownMenuItem(text = { Text(if (libraryVideos) "Remove from library"
+                                            else if (jobsOnly) "Delete attempt" else "Remove from history") },
                                             onClick = execute { act { app.downloads.remove(item, false) } })
                                     }
                                 }

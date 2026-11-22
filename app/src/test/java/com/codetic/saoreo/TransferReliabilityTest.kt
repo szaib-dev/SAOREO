@@ -93,6 +93,18 @@ class TransferReliabilityTest {
         } finally { file.delete() }
     }
 
+    @Test fun distinguishesCompleteFragmentedMp4FromProgressiveMp4() {
+        val file = Files.createTempFile("saoreo-fragmented", ".mp4").toFile()
+        try {
+            fun box(type: String) = byteArrayOf(0, 0, 0, 9) + type.toByteArray() + byteArrayOf(1)
+            file.writeBytes(box("moov") + box("moof") + box("mdat"))
+            assertTrue(hasCompleteMp4Boxes(file))
+            assertFalse(hasCompleteMp4Boxes(file, allowFragments = false))
+            file.writeBytes(box("moov") + box("mdat"))
+            assertTrue(hasCompleteMp4Boxes(file, allowFragments = false))
+        } finally { file.delete() }
+    }
+
     @Test fun rejectsDocumentsRegardlessOfMp4ExtensionOrMissingHeader() {
         val file = Files.createTempFile("saoreo-integrity", ".mp4").toFile()
         try {

@@ -3,7 +3,7 @@ import base64
 import unittest
 from aiohttp.test_utils import TestClient, TestServer
 from service import Together
-from relay import byte_range, CHUNK
+from relay import byte_range, CHUNK, READ_AHEAD
 
 KEY = 'range-relay-test-key-at-least-16'
 
@@ -21,7 +21,7 @@ class RangeTests(unittest.TestCase):
 class RelayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = Together(KEY)
-        self.client = TestClient(TestServer(self.service.app()))
+        self.client = TestClient(TestServer(self.service.app(), handler_cancellation=True))
         await self.client.start_server()
         self.ws = []
         self.tasks = []
@@ -95,6 +95,42 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get(f"/together/share/{a['room']}/{identifier}", headers=self.auth(b))
         self.assertEqual(200, response.status)
         self.assertEqual(bytes(i % 251 for i in range(size)), await response.read())
+        self.assertEqual({}, self.service.relay.pending)
+
+    async def test_prefetch_overlaps_source_round_trips_and_keeps_range_order(self):
+        a, b, wa, _ = await self.pair()
+        start = 23
+        identifier = await self.register(a, start + READ_AHEAD * CHUNK)
+        path = f"/together/share/{a['room']}/{identifier}"
+        response_task = asyncio.ensure_future(self.client.get(path, headers=self.auth(b) | {'Range': f'bytes={start}-'}))
+        self.tasks.append(response_task)
+
+        # Each read is issued before the source answers any of them.
+        requests = [await self.event(wa, 'fileRead') for _ in range(READ_AHEAD)]
+        self.assertEqual(list(range(start, start + READ_AHEAD * CHUNK, CHUNK)), [r['offset'] for r in requests])
+        for index, request in reversed(list(enumerate(requests))):
+            payload = bytes([index]) * request['length']
+            await wa.send_json(dict(type='fileChunk', request=request['request'], data=base64.b64encode(payload).decode()))
+        response = await response_task
+        self.assertEqual(206, response.status)
+        self.assertEqual(b''.join(bytes([i]) * CHUNK for i in range(READ_AHEAD)), await response.read())
+        self.assertEqual({}, self.service.relay.pending)
+
+    async def test_receiver_disconnect_cancels_prefetched_reads(self):
+        a, b, wa, _ = await self.pair()
+        identifier = await self.register(a)
+        response_task = asyncio.ensure_future(self.client.get(f"/together/share/{a['room']}/{identifier}", headers=self.auth(b)))
+        self.tasks.append(response_task)
+        requests = [await self.event(wa, 'fileRead') for _ in range(READ_AHEAD)]
+        first = requests[0]
+        await wa.send_json(dict(type='fileChunk', request=first['request'], data=base64.b64encode(b'x' * first['length']).decode()))
+        response = await response_task
+        self.assertEqual(b'x' * CHUNK, await response.content.readexactly(CHUNK))
+        response.close()
+
+        async with asyncio.timeout(3):
+            while self.service.relay.readers:
+                await asyncio.sleep(.01)
         self.assertEqual({}, self.service.relay.pending)
 
     async def test_truncated_or_offline_source_is_not_a_successful_media_response(self):

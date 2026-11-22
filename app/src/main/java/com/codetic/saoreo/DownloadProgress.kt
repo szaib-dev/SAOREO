@@ -63,7 +63,7 @@ internal class DownloadNotifications(private val app: SaoreoApp) {
         Intent(app, DownloadActionReceiver::class.java).setAction(action).putExtra("download_id", key), flags)
 
     private fun base(channel: String, title: String) = NotificationCompat.Builder(app, channel)
-        .setSmallIcon(R.drawable.ic_download_notice).setContentTitle(title.take(110))
+        .setSmallIcon(R.drawable.ic_app_notification).setContentTitle(title.take(110))
         .setOnlyAlertOnce(true).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
 
     fun ongoing(key: String, title: String, progress: TransferProgress): Notification {

@@ -100,6 +100,46 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         state = await self.event(wa, 'state', lambda s: s['revision'] >= state['revision'])
         self.assertFalse(state['playing'])
 
+    async def test_network_reports_identify_the_member_without_changing_playback(self):
+        a, b, wa, wb = await self.pair()
+        await wa.send_json(dict(type='ping', sent=12, slowConnection=True, member=b['member']))
+        self.assertEqual(12, (await self.event(wa, 'pong'))['sent'])
+        self.assertEqual(dict(type='network', member=a['member'], slow=True), await self.event(wb, 'network'))
+        room = self.service.rooms[a['room']]
+        revision = room.revision
+        await wa.send_json(dict(type='ping', sent=13, slowConnection=False))
+        self.assertEqual(dict(type='network', member=a['member'], slow=False), await self.event(wb, 'network'))
+        self.assertEqual(revision, room.revision)
+
+    async def test_finished_video_advances_shared_queue_once_and_waits_for_both_players(self):
+        _, _, left, right = await self.pair()
+        await left.send_json(dict(type='media', seq=1, media=VIDEO))
+        start = await self.event(right, 'state', lambda s: s['media'] is not None)
+        self.assertTrue(start['autoAdvanceQueue'])
+        original = start['media']['id']
+        for seq, title in enumerate(['Second', 'Third'], start=2):
+            await left.send_json(dict(type='queueAdd', seq=seq, media=dict(VIDEO, title=title)))
+        await self.event(right, 'state', lambda s: len(s['queue']) == 2)
+        for ws in (left, right):
+            await ws.send_json(dict(type='status', ready=True, mediaId=original))
+        await self.event(right, 'state', lambda s: all(m['ready'] for m in s['members']))
+        await left.send_json(dict(type='play', seq=4, mediaId=original))
+        await self.event(right, 'state', lambda s: s['playing'])
+        await left.send_json(dict(type='finished', seq=5, mediaId=original))
+        queued = await self.event(right, 'state', lambda s: s['media']['title'] == 'Second')
+        self.assertTrue(queued['wanted'])
+        self.assertFalse(queued['playing'])
+        next_id = queued['media']['id']
+        await right.send_json(dict(type='finished', seq=1, mediaId=original))
+        await right.send_json(dict(type='status', ready=True, mediaId=next_id))
+        waiting = await self.event(left, 'state', lambda s: s['media'] and
+                                   s['media']['id'] == next_id and s['members'][1]['ready'])
+        self.assertFalse(waiting['playing'])
+        self.assertEqual(['Third'], [item['title'] for item in waiting['queue']])
+        await left.send_json(dict(type='status', ready=True, mediaId=next_id))
+        playing = await self.event(right, 'state', lambda s: s['media']['id'] == next_id and s['playing'])
+        self.assertEqual('Second', playing['media']['title'])
+
     async def test_chat_reactions_and_call_signals(self):
         a,b,wa,wb = await self.pair()
         await wa.send_json(dict(type='chat', text='Hello partner'))

@@ -398,26 +398,55 @@ class LibraryPlayerActivity : ComponentActivity() {
             androidx.compose.animation.AnimatedVisibility(controls || error != null, modifier = Modifier.matchParentSize(),
                 enter = fadeIn(tween(180)), exit = fadeOut(tween(140))) {
                 CompositionLocalProvider(LocalContentColor provides Color.White, LocalPickerVisibility provides { open -> speed = open }) {
-                Box(Modifier.fillMaxSize()) {
-                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .88f), Color.Transparent)))
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 54.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { finish() }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to Downloads") }
-                        Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                            Text("SAOREO PLAYER", color = Lime, style = MaterialTheme.typography.labelSmall)
-                            Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                    Box(Modifier.fillMaxSize()) {
+                        Text(item.title, Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .8f), Color.Transparent)))
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                            .padding(horizontal = 18.dp, vertical = 12.dp),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .88f))))
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+                            .padding(horizontal = 12.dp, vertical = 4.dp)) {
+                            PlaybackSeek(reading, player) { interacted++ }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { finish() }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to Downloads") }
+                                IconButton(onClick = {
+                                    if (player.playWhenReady && !reading.ended) player.pause()
+                                    else { if (reading.ended) player.seekTo(0); player.play() }
+                                    interacted++
+                                }, enabled = error == null) {
+                                    val paused = !player.playWhenReady || reading.ended
+                                    Icon(painterResource(if (paused) R.drawable.ic_media_play else R.drawable.ic_media_pause),
+                                        if (paused) "Play" else "Pause", Modifier.size(24.dp))
+                                }
+                                IconButton(onClick = { showMedia(this@LibraryPlayerActivity, uri, item.mime ?: "video/mp4", true) }) {
+                                    Icon(Icons.Outlined.Share, "Share video", Modifier.size(21.dp))
+                                }
+                                IconButton(onClick = { overflow = true }) { Icon(Icons.Outlined.MoreVert, "Video actions") }
+                                MediaIcon(if (fullscreen) R.drawable.ic_media_exit else R.drawable.ic_media_full,
+                                    if (fullscreen) "Exit fullscreen" else "Landscape fullscreen") {
+                                    setFullscreen(!fullscreen); interacted++
+                                }
+                            }
                         }
-                        Box {
-                            IconButton(onClick = { overflow = true }) { Icon(Icons.Outlined.MoreVert, "Video actions") }
-                            if (overflow) ModalBottomSheet(onDismissRequest = { overflow = false },
-                                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-                                Column(Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()).navigationBarsPadding().padding(16.dp)) {
-                                    Text("Video actions", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(12.dp))
-
-                                DropdownMenuItem(text = { Text("Share") }, onClick = {
-                                    overflow = false; showMedia(this@LibraryPlayerActivity, uri, item.mime ?: "video/mp4", true)
-                                })
+                        if (overflow) ModalBottomSheet(onDismissRequest = { overflow = false },
+                            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+                            Column(Modifier.fillMaxWidth().heightIn(max = 500.dp).verticalScroll(rememberScrollState())
+                                .navigationBarsPadding().padding(16.dp)) {
+                                Text("Video actions", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(12.dp))
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    ChoiceMenu("${reading.speed}×", listOf(.5f, .75f, 1f, 1.25f, 1.5f, 2f), { "${it}×" }) {
+                                        player.setPlaybackSpeed(it); interacted++
+                                    }
+                                    ChoiceMenu(display, listOf("Fit", "Fill", "Crop"), { it }) { display = it; interacted++ }
+                                }
+                                if (list.size > 1) {
+                                    DropdownMenuItem(text = { Text("Previous video") }, enabled = index > 0, onClick = { overflow = false; move(-1) })
+                                    DropdownMenuItem(text = { Text("Next video") }, enabled = index >= 0 && index < list.lastIndex,
+                                        onClick = { overflow = false; move(1) })
+                                }
                                 DropdownMenuItem(text = { Text("Details") }, onClick = { overflow = false; details = true })
                                 DropdownMenuItem(text = { Text("Convert to MP3") }, onClick = { overflow = false; conversion = true })
                                 DropdownMenuItem(text = { Text("Rotate video 90°") }, onClick = {
@@ -440,49 +469,9 @@ class LibraryPlayerActivity : ComponentActivity() {
                                     DropdownMenuItem(text = { Text("Audio track") }, onClick = { overflow = false; audioTracks = true })
                                 }
                                 DropdownMenuItem(text = { Text("Subtitles") }, onClick = { overflow = false; captions = true })
-                                                            }
                             }
                         }
                     }
-                }
-                if (error == null) {
-                    Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                        MediaIcon(R.drawable.ic_media_prev, "Previous video", enabled = index > 0) { move(-1) }
-                        IconButton(modifier = Modifier.size(76.dp).background(Lime, RoundedCornerShape(26.dp)),
-                            onClick = {
-                                if (player.playWhenReady && !reading.ended) player.pause()
-                                else { if (reading.ended) player.seekTo(0); player.play() }
-                                interacted++
-                            }) {
-                            val paused = !player.playWhenReady || reading.ended
-                            Icon(painterResource(if (paused) R.drawable.ic_media_play else R.drawable.ic_media_pause),
-                                if (paused) "Play" else "Pause", Modifier.size(36.dp), tint = Ink)
-                        }
-                        MediaIcon(R.drawable.ic_media_next, "Next video", enabled = index >= 0 && index < list.lastIndex) { move(1) }
-                    }
-                }
-                Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .82f))))
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                    .padding(horizontal = 14.dp, vertical = 4.dp)) {
-                    CompactSeek(reading, player, darkSurface = true) { interacted++ }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically) {
-                        MaterialTheme(colorScheme = darkColorScheme(primary = Lime, onPrimary = Ink,
-                            surface = Ink, onSurface = Color.White, surfaceContainer = Ink)) {
-                            ChoiceMenu("${reading.speed}\u00d7", listOf(.5f, .75f, 1f, 1.25f, 1.5f, 2f), { "${it}\u00d7" }) {
-                                player.setPlaybackSpeed(it); interacted++
-                            }
-                            ChoiceMenu(display, listOf("Fit", "Fill", "Crop"), { it }) { display = it; interacted++ }
-                        }
-                        MediaIcon(if (fullscreen) R.drawable.ic_media_exit else R.drawable.ic_media_full,
-                            if (fullscreen) "Exit fullscreen" else "Landscape fullscreen") {
-                            setFullscreen(!fullscreen); interacted++
-                        }
-                    }
-                }
-                }
                 }
             }
         }
@@ -588,18 +577,8 @@ internal fun playbackTime(milliseconds: Long): String {
 
 @Composable
 internal fun PlaybackSeek(reading: Playback, player: Player, onInteract: () -> Unit = {}) {
-    var target by remember { mutableStateOf<Float?>(null) }
-    val duration = reading.duration
-    val current = target ?: if (duration > 0) (reading.position.toDouble() / duration).toFloat().coerceIn(0f, 1f) else 0f
-    val seeking = duration > 0 && player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) && player.isCurrentMediaItemSeekable
-    Slider(value = current, onValueChange = { target = it; onInteract() }, onValueChangeFinished = {
-        target?.let { player.seekTo((it.toDouble() * duration).toLong()) }; target = null; onInteract()
-    }, enabled = seeking, modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Playback position" })
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(playbackTime(target?.let { (it.toDouble() * duration).toLong() } ?: reading.position),
-            style = MaterialTheme.typography.labelMedium)
-        Text(if (duration > 0) playbackTime(duration) else "–:––", style = MaterialTheme.typography.labelMedium)
-    }
+    val seeking = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) && player.isCurrentMediaItemSeekable
+    MediaTimeline(reading.position, reading.duration, seeking, onInteract = onInteract, onSeek = player::seekTo)
 }
 
 @Composable

@@ -82,6 +82,8 @@ User=saoreo-together
 Group=saoreo-together
 WorkingDirectory=/opt/saoreo-together
 EnvironmentFile=/etc/saoreo-together.env
+StateDirectory=saoreo-together
+Environment=TOGETHER_PAIR_DB=/var/lib/saoreo-together/pairs.sqlite3
 ExecStart=/opt/saoreo-together/venv/bin/python /opt/saoreo-together/service.py
 Restart=on-failure
 RestartSec=3
@@ -151,7 +153,8 @@ def main():
         sftp.mkdir(stage, mode=0o700)
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode='w') as tar:
-            for name in ['service.py', 'relay.py', 'requirements.txt', 'test_service.py', 'test_relay.py']:
+            for name in ['service.py', 'relay.py', 'pairing.py', 'games.py', 'game_physics.py', 'requirements.txt',
+                         'test_service.py', 'test_relay.py', 'test_pairing.py', 'test_games.py']:
                 tar.add(pathlib.Path(__file__).parent / name, arcname=name)
         with sftp.open(stage + '/source.tar', 'wb') as f: f.write(archive.getvalue())
         with sftp.open(stage + '/deploy.sh', 'w') as f: f.write(SCRIPT)

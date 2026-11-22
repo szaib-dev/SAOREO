@@ -216,7 +216,7 @@ class Extractor(private val context: Context) {
         }
         val id = choice.selector.replace(Regex("[^a-zA-Z0-9+_.-]"), "")
         require(id.isNotBlank() && id == choice.selector)
-        suspend fun execute(info: File?) = coroutineScope {
+        suspend fun execute(info: File?, outputDirectory: File = directory, instagramFormat: String? = null) = coroutineScope {
             val streams = linkedMapOf<String, Pair<Long, Long?>>()
             val expected = id.split('+').size
             val process = async { run(link, timeout, retries, replayInfo = info, callback = { _, _, line ->
@@ -254,9 +254,11 @@ class Extractor(private val context: Context) {
                 }
             }) {
                 val freshInstagram = link.source == Source.INSTAGRAM && info == null
-                addOption("-f", if (freshInstagram) {
-                    if (choice.audioOnly) "bestaudio/best" else "bestvideo+bestaudio/best"
-                } else selector ?: id)
+                addOption("-f", when {
+                    instagramFormat != null -> instagramFormat
+                    freshInstagram -> "bestaudio/best"
+                    else -> selector ?: id
+                })
                 if (freshInstagram) addOption("-S", listOfNotNull(choice.height?.let { "res:$it" },
                     "vcodec:h264", "acodec:aac").joinToString(","))
                 if (link.source == Source.YOUTUBE) addOption("--check-formats")
@@ -265,13 +267,13 @@ class Extractor(private val context: Context) {
                     addCommands(listOf("--print-to-file", """before_dl:{"title":%(title)j,"formats":%(requested_formats)j,"filesize":%(filesize)j,"filesize_approx":%(filesize_approx)j}""", resultInfo.absolutePath))
                     addOption("-S", "res,vcodec:h264,acodec:aac")
                 }
-                addOption("-o", File(directory, "media.%(ext)s").absolutePath)
+                addOption("-o", File(outputDirectory, "media.%(ext)s").absolutePath)
                 addOption("--newline")
                 addOption("--progress")
                 addOption("--progress-template", """download:[download] SAOREO {"format":%(info.format_id)j,"status":%(progress.status)j,"bytes":%(progress.downloaded_bytes)j,"total":%(progress.total_bytes)j,"speed":%(progress.speed)j}""")
                 addOption("--progress-template", "postprocess:SAOREO_PROCESS %(progress.status)s")
                 addOption("--progress-delta", "0.75")
-                addOption(if (resume) "--continue" else "--no-continue")
+                addOption(if (resume && instagramFormat == null) "--continue" else "--no-continue")
                 addOption("--fragment-retries", retries)
                 addOption("--abort-on-unavailable-fragments")
                 addOption("--retry-sleep", "http:exp=1:10")
@@ -279,7 +281,7 @@ class Extractor(private val context: Context) {
                 addOption("--downloader", "m3u8:native")
                 addOption("--hls-prefer-native")
                 addOption("--concurrent-fragments", 4)
-                addOption("--http-chunk-size", "10M")
+                if (link.source != Source.INSTAGRAM) addOption("--http-chunk-size", "10M")
                 if (choice.audioOnly && choice.extension == "mp3") {
                     addOption("-x")
                     addOption("--audio-format", "mp3")
@@ -307,6 +309,37 @@ class Extractor(private val context: Context) {
         try {
             removeErrorDocuments(directory)
             completedMedia(directory, choice, link.source)?.let { return it }
+            if (link.source == Source.INSTAGRAM && !choice.audioOnly && choice.extension == "mp4") {
+                // Resolve each format from the public post with its current metadata and CDN headers.
+                // A completed download can still fail Android validation, so isolate each attempt.
+                val formats = instagramVideoFormats(choice.requiresAudio)
+                var lastFailure: IOException? = null
+                for ((index, format) in formats.withIndex()) {
+                    val attempt = withContext(Dispatchers.IO) {
+                        java.nio.file.Files.createTempDirectory(directory.toPath(), "instagram-download-").toFile()
+                    }
+                    try {
+                        if (index > 0) progress(TransferProgress("Trying another Instagram format"))
+                        execute(null, attempt, instagramFormat = format)
+                        val file = completedMedia(attempt, choice, link.source) ?: throw InvalidMediaException()
+                        val output = File(directory, file.name)
+                        withContext(Dispatchers.IO) {
+                            if (!file.renameTo(output)) throw IOException("Could not stage the Instagram download.")
+                        }
+                        return output
+                    } catch (failure: IOException) {
+                        if (index == formats.lastIndex || failure.message.orEmpty().contains("429") ||
+                            failure.message.orEmpty().contains("no space left", ignoreCase = true)) {
+                            lastFailure?.let(failure::addSuppressed)
+                            throw failure
+                        }
+                        lastFailure = failure
+                    } finally {
+                        withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { attempt.deleteRecursively() }
+                    }
+                }
+                throw InvalidMediaException(lastFailure)
+            }
             if (selector == null && choice.reusableStreams.map { it.id } == id.split('+')) {
                 val info = withContext(Dispatchers.IO) { writeStreamInfo(choice) }
                 try {
@@ -323,7 +356,8 @@ class Extractor(private val context: Context) {
             }
             resultInfo?.delete()
             execute(null)
-            return completedMedia(directory, choice, link.source) ?: throw InvalidMediaException()
+            completedMedia(directory, choice, link.source)?.let { return it }
+            throw InvalidMediaException()
         } finally {
             removeErrorDocuments(directory)
             firstWrite.stopWatching()
@@ -394,7 +428,7 @@ class Extractor(private val context: Context) {
                             val proxyStart = SystemClock.elapsedRealtimeNanos()
                             val localProxy = when {
                                 link.source in setOf(Source.YOUTUBE, Source.INSTAGRAM) -> MediaProxy(trace,
-                                    consistentFamily = true,
+                                    consistentFamily = link.source == Source.YOUTUBE,
                                     onFailure = { host, reason -> (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(JSONObject()
                                         .put("stage", "local_proxy").put("host", host).put("status", 502).put("reason", reason).toString()) },
                                     onRoute = { host, family -> (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(JSONObject()
@@ -502,8 +536,8 @@ class Extractor(private val context: Context) {
             val videoCodec = format.optString("vcodec").takeUnless { it.isBlank() || it == "null" }
             val audioCodec = format.optString("acodec").takeUnless { it.isBlank() || it == "null" }
             val hasVideo = videoCodec?.let { it != "none" } ?: (ext in videoExtensions)
-            val hasAudio = audioCodec?.let { it != "none" }
-                ?: (!hasVideo && ext in audioExtensions || hasVideo)
+            val hasAudio = audioCodec?.takeUnless { source == Source.INSTAGRAM && it == "unknown" }
+                ?.let { it != "none" } ?: (!hasVideo && ext in audioExtensions || hasVideo && source != Source.INSTAGRAM)
             val bitrate = format.optDouble("tbr", 0.0)
             val size = expectedSize(
                 format.optLong("filesize"), format.optLong("filesize_approx"),
@@ -523,7 +557,7 @@ class Extractor(private val context: Context) {
             )
             val choice = Choice(id, resolution, ext, size,
                 audioOnly = !hasVideo, hasAudio = hasAudio, reusableStreams = listOfNotNull(replay),
-                requiresAudio = audioCodec != null && audioCodec != "none")
+                requiresAudio = hasAudio && audioCodec != null)
             if (hasVideo && ext in videoExtensions) video += choice
             if (!hasVideo && hasAudio && ext in audioExtensions) {
                 audio += choice to bitrate

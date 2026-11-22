@@ -27,6 +27,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -191,7 +192,7 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
                         }) { Icon(Icons.Outlined.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Paste") }
                         if (!ai) Button(enabled = link != null && !status.busy, onClick = {
                             link?.let { engine.discover(it, refresh = status.captionFailure) }; selected = null
-                        }) { Icon(Icons.Outlined.Search, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(if (status.captionFailure) "Retry" else "Find captions") }
+                        }) { Icon(painterResource(R.drawable.ic_ui_search), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(if (status.captionFailure) "Retry" else "Find captions") }
                         else Button(enabled = !status.busy, onClick = {
                             openMedia.launch(localDocument("*/*").putExtra(android.content.Intent.EXTRA_MIME_TYPES,
                                 arrayOf("audio/*", "video/*")))
@@ -264,12 +265,12 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("${result.lines.size} lines", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    IconButton({ searching = !searching; if (!searching) search = "" }) { Icon(Icons.Outlined.Search, "Search transcript") }
+                    IconButton({ searching = !searching; if (!searching) search = "" }) { Icon(painterResource(R.drawable.ic_ui_search), "Search transcript") }
                     IconButton({ engine.reset(); url = "" }) { Icon(Icons.Outlined.Add, "New transcript") }
                 }
                 AnimatedVisibility(searching) {
                     OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true,
-                        placeholder = { Text("Search transcript") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, shape = RoundedCornerShape(18.dp))
+                        placeholder = { Text("Search transcript") }, leadingIcon = { Icon(painterResource(R.drawable.ic_ui_search), null) }, shape = RoundedCornerShape(18.dp))
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     FilterChip(timestamps, { timestamps = !timestamps }, { Text("Time") }, leadingIcon = { Icon(Icons.Outlined.DateRange, null, Modifier.size(16.dp)) }, shape = RoundedCornerShape(18.dp))

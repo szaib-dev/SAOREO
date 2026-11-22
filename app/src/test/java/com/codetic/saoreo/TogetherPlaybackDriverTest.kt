@@ -60,4 +60,20 @@ class TogetherPlaybackDriverTest {
         assertEquals(2, statuses.size)
         assertFalse(retryTogetherPlay(true, false, true, 10000))
     }
+
+    @Test fun aSharedReplaySeeksAnEndedClipEvenBelowTheDriftThreshold() {
+        val room = TogetherState(connected = true, timeline = SharedTimeline(0, 0, true))
+        val driver = TogetherPlayback({ room }, { 0 }, { _, _ -> true }, { 100 })
+        val commands = mutableListOf<String>()
+        driver.ready = true
+        driver.ended = true
+        driver.position = 500
+        driver.duration = 500
+        driver.seek = { commands += "seek $it" }
+        driver.play = { commands += "play $it" }
+
+        driver.apply(room)
+
+        assertEquals(listOf("seek 0", "play true"), commands)
+    }
 }

@@ -8,7 +8,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings as AndroidSettings
@@ -49,7 +48,7 @@ class ShortcutService : Service() {
         val stop = PendingIntent.getService(this, 0, Intent(this, ShortcutService::class.java).setAction(STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         ServiceCompat.startForeground(this, 1, NotificationCompat.Builder(this, "shortcut")
-            .setSmallIcon(android.R.drawable.ic_menu_share).setContentTitle("SAOREO shortcut")
+            .setSmallIcon(R.drawable.ic_app_notification).setContentTitle("SAOREO shortcut")
             .setContentText("Tap the floating button to paste a link.").setOngoing(true)
             .addAction(0, "Hide", stop).build(),
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
@@ -73,10 +72,9 @@ class ShortcutService : Service() {
         val view = button ?: ImageButton(this).apply {
             setImageResource(R.drawable.mark)
             contentDescription = "Open SAOREO link input"
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0xff302743.toInt())
-            }
+            background = null
+            setPadding(0, 0, 0, 0)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
             elevation = dp(3).toFloat()
             setOnClickListener {
                 startActivity(Intent(this@ShortcutService, MainActivity::class.java).setAction(OPEN)

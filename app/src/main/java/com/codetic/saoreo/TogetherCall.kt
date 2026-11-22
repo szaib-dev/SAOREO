@@ -1,8 +1,10 @@
 package com.codetic.saoreo
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,7 +15,8 @@ import org.webrtc.audio.JavaAudioDeviceModule
 
 internal data class TogetherCallState(val active: Boolean = false, val mic: Boolean = false, val camera: Boolean = false,
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
-    val output: String = "Phone audio", val error: String? = null)
+    val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
+    val error: String? = null)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
 internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false) : AutoCloseable {
@@ -31,6 +34,13 @@ internal class TogetherCall(private val context: Context, private val session: T
     private val videoTrack: VideoTrack
     private var capturer: CameraVideoCapturer? = null
     private var texture: SurfaceTextureHelper? = null
+    private var screenCapturer: ScreenCapturerAndroid? = null
+    private var screenTexture: SurfaceTextureHelper? = null
+    private var screenSource: VideoSource? = null
+    private var screenTrack: VideoTrack? = null
+    private var videoSender: RtpSender? = null
+    private var selectedOutput: Int? = null
+    private var selectedInput: Int? = null
     private var peer: PeerConnection? = null
     private var remoteId: String? = null
     private var closed = false
@@ -66,13 +76,14 @@ internal class TogetherCall(private val context: Context, private val session: T
 
     fun start(camera: Boolean) {
         if (closed) return
+        if (mutable.value.active) return
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         mutable.value = mutable.value.copy(active = true, mic = true, connection = "Waiting for your partner", error = null)
         audioTrack.setEnabled(true)
         if (camera) camera(true)
         announce()
         members(session.state.value)
-        refreshOutput()
+        routeAudio()
     }
     fun microphone(enabled: Boolean) {
         audioTrack.setEnabled(enabled && mutable.value.active)
@@ -81,6 +92,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     }
     fun camera(enabled: Boolean) {
         if (!mutable.value.active) return
+        if (enabled && mutable.value.sharing) stopScreenShare()
         try {
             if (enabled && capturer == null) {
                 val enumerator = Camera2Enumerator(context)
@@ -104,29 +116,63 @@ internal class TogetherCall(private val context: Context, private val session: T
     }
     fun flip() { capturer?.switchCamera(null) }
     fun devices(): List<AudioDeviceInfo> = audioManager.availableCommunicationDevices
-    fun output(device: AudioDeviceInfo) {
-        if (!audioManager.setCommunicationDevice(device)) mutable.value = mutable.value.copy(error = "Audio output is unavailable")
+    fun inputs(): List<AudioDeviceInfo> = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).filter {
+        it.type in setOf(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_DEVICE)
+    }.distinctBy { it.type to it.productName }
+    fun output(device: AudioDeviceInfo?) {
+        selectedOutput = device?.id
+        routeAudio()
+    }
+    fun input(device: AudioDeviceInfo?) {
+        selectedInput = device?.id
+        applyInput()
+    }
+    private fun routeAudio() {
+        if (!mutable.value.active) return
+        val devices = devices()
+        val requested = devices.firstOrNull { it.id == selectedOutput }
+        if (requested == null) selectedOutput = null
+        val target = requested ?: devices.firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        }
+        if (target == null) audioManager.clearCommunicationDevice()
+        else if (!audioManager.setCommunicationDevice(target) && requested != null) reportError("Audio output is unavailable")
+        applyInput()
         refreshOutput()
+    }
+    private fun applyInput() {
+        val device = inputs().firstOrNull { it.id == selectedInput }
+        if (device == null) selectedInput = null
+        adm.setPreferredInputDevice(device)
+        mutable.value = mutable.value.copy(input = device?.let(::outputName) ?: "System default")
     }
     fun refreshOutput() {
         val device = audioManager.communicationDevice
         mutable.value = mutable.value.copy(output = device?.let(::outputName) ?: "Phone audio")
     }
     private val deviceCallback = object : android.media.AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { refreshOutput() }
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { refreshOutput() }
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { routeAudio() }
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { routeAudio() }
     }
     init { audioManager.registerAudioDeviceCallback(deviceCallback, main) }
 
     private fun announce() {
         val s = mutable.value
-        session.send("call", JSONObject().put("active", s.active).put("mic", s.mic).put("camera", s.camera))
+        session.send("call", JSONObject().put("active", s.active).put("mic", s.mic).put("camera", s.camera || s.sharing))
     }
     fun members(room: TogetherState) {
         if (closed) return
         val me = room.members.firstOrNull { it.id == room.member }
         val other = room.members.firstOrNull { it.id != room.member && it.online && it.call }
-        if (!room.connected || !mutable.value.active || other == null) {
+        if (!room.connected) return
+        if (mutable.value.active && me?.call == false) {
+            if (peer != null) disposePeer()
+            announce()
+            return
+        }
+        if (!mutable.value.active || other == null) {
             disposePeer()
             if (mutable.value.active) mutable.value = mutable.value.copy(connection = "Waiting for your partner")
             return
@@ -194,7 +240,8 @@ internal class TogetherCall(private val context: Context, private val session: T
             }
         }) ?: error("Unable to create call connection")
         peer?.addTrack(audioTrack, listOf("saoreo-call"))
-        val sender = peer?.addTrack(videoTrack, listOf("saoreo-call"))
+        val sender = peer?.addTrack(screenTrack ?: videoTrack, listOf("saoreo-call"))
+        videoSender = sender
         // Cap camera bitrate; the watched video never goes through this connection.
         sender?.let {
             val params = sender.parameters
@@ -251,19 +298,68 @@ internal class TogetherCall(private val context: Context, private val session: T
         private fun failed() { main.post { if (!closed) mutable.value = mutable.value.copy(error = "Call negotiation failed. End and rejoin the call.") } }
     }
     private fun disposePeer() {
+        videoSender = null
         peerGeneration++; peer?.close(); peer?.dispose(); peer = null; remoteId = null
         hasRemoteDescription = false; offerStarted = false; candidates.clear()
         mutable.value = mutable.value.copy(remoteVideo = null)
     }
     fun stop() {
+        stopScreenShare()
         camera(false); audioTrack.setEnabled(false); disposePeer()
         mutable.value = mutable.value.copy(active = false, mic = false, camera = false, connection = "Call is off", error = null)
         announce()
+        TogetherActiveCallService.end(context, this)
+        selectedOutput = null
+        selectedInput = null
+        adm.setPreferredInputDevice(null)
         audioManager.clearCommunicationDevice(); audioManager.mode = oldMode
+    }
+    fun hangUp() {
+        stop()
+        if (session.state.value.pairKind in setOf(PairKind.AUDIO, PairKind.VIDEO)) session.leave()
+    }
+    fun reportError(error: String) { mutable.value = mutable.value.copy(error = error) }
+
+    fun shareScreen(result: Intent) {
+        check(mutable.value.active && screenCapturer == null)
+        val capture = ScreenCapturerAndroid(result, object : MediaProjection.Callback() {
+            override fun onStop() { main.post { stopScreenShare() } }
+        })
+        screenCapturer = capture
+        try {
+            val source = factory.createVideoSource(true).also { screenSource = it }
+            val helper = SurfaceTextureHelper.create("SAOREO-screen", egl.eglBaseContext).also { screenTexture = it }
+            capture.initialize(helper, context, source.capturerObserver)
+            val metrics = context.resources.displayMetrics
+            val scale = minOf(1f, 1280f / maxOf(metrics.widthPixels, metrics.heightPixels))
+            capture.startCapture((metrics.widthPixels * scale).toInt(), (metrics.heightPixels * scale).toInt(), 15)
+            val track = factory.createVideoTrack("saoreo-screen", source).also { screenTrack = it }
+            check(videoSender?.setTrack(track, false) != false)
+            camera(false)
+            mutable.value = mutable.value.copy(sharing = true, localVideo = track)
+            announce()
+        } catch (error: RuntimeException) {
+            stopScreenShare()
+            throw error
+        }
+    }
+
+    fun stopScreenShare() {
+        val capture = screenCapturer ?: return
+        screenCapturer = null
+        videoSender?.setTrack(videoTrack, false)
+        runCatching { capture.stopCapture() }
+        capture.dispose()
+        screenTrack?.dispose(); screenTrack = null
+        screenSource?.dispose(); screenSource = null
+        screenTexture?.dispose(); screenTexture = null
+        mutable.value = mutable.value.copy(sharing = false, localVideo = videoTrack)
+        TogetherActiveCallService.projectionEnded(this)
+        announce()
     }
     private fun networkLost() {
         if (closed) return
-        stop()
+        if (mutable.value.active) mutable.value = mutable.value.copy(connection = "Reconnecting to Together")
     }
     override fun close() {
         if (closed) return
@@ -276,6 +372,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         fun outputName(device: AudioDeviceInfo): String = when (device.type) {
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
             AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"
+            AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Phone microphone"
             AudioDeviceInfo.TYPE_BLUETOOTH_SCO, AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth headset"
             AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_USB_HEADSET -> "Headphones"
             else -> device.productName.toString()

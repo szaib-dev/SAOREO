@@ -213,7 +213,7 @@ interface DownloadDao {
     suspend fun clear()
 }
 
-@Database(entities = [Download::class, DownloadFolder::class, MusicPlaylist::class, PlaylistTrack::class, SongState::class], version = 4)
+@Database(entities = [Download::class, DownloadFolder::class, MusicPlaylist::class, PlaylistTrack::class, SongState::class], version = 5)
 abstract class DownloadDb : RoomDatabase() {
     abstract fun downloads(): DownloadDao
     internal abstract fun collections(): CollectionDao
@@ -251,10 +251,17 @@ internal val playlistArtworkMigration = object : Migration(3, 4) {
     }
 }
 
+internal val playlistOrderMigration = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE playlists ADD COLUMN sortPosition INTEGER")
+    }
+}
+
 class SaoreoApp : Application(), ImageLoaderFactory {
     val preferences by lazy { PreferencesStore(this) }
+    internal val pairing by lazy { TogetherPairing(this) }
     internal val database by lazy { Room.databaseBuilder(this, DownloadDb::class.java, "downloads.db")
-        .addMigrations(collectionsMigration, libraryMigration, playlistArtworkMigration).build() }
+        .addMigrations(collectionsMigration, libraryMigration, playlistArtworkMigration, playlistOrderMigration).build() }
     val dao get() = database.downloads()
     internal val collections by lazy { Collections(this) }
     internal val audioControl = AudioControl()

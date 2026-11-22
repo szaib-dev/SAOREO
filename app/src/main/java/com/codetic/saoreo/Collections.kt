@@ -26,7 +26,10 @@ import java.util.UUID
 internal data class DownloadFolder(@PrimaryKey val id: String, val parent: String, val name: String)
 
 @Entity(tableName = "playlists")
-internal data class MusicPlaylist(@PrimaryKey val id: String, val name: String, val thumbnail: String? = null, val sourceUrl: String? = null)
+internal data class MusicPlaylist(
+    @PrimaryKey val id: String, val name: String, val thumbnail: String? = null, val sourceUrl: String? = null,
+    val sortPosition: Int? = null,
+)
 
 @Entity(tableName = "playlist_tracks", primaryKeys = ["playlist", "song"],
     foreignKeys = [
@@ -48,11 +51,16 @@ internal interface CollectionDao {
     @Insert suspend fun insert(folder: DownloadFolder)
     @Query("UPDATE folders SET name = :name WHERE id = :id") suspend fun renameFolder(id: String, name: String)
     @Query("UPDATE folders SET parent = :parent WHERE id = :id") suspend fun moveFolder(id: String, parent: String)
-    @Query("SELECT * FROM playlists ORDER BY name COLLATE NOCASE") fun playlists(): Flow<List<MusicPlaylist>>
+    @Query("SELECT * FROM playlists ORDER BY sortPosition IS NULL, sortPosition, name COLLATE NOCASE, id")
+    fun playlists(): Flow<List<MusicPlaylist>>
+    @Query("SELECT id FROM playlists ORDER BY sortPosition IS NULL, sortPosition, name COLLATE NOCASE, id")
+    suspend fun orderedPlaylistIds(): List<String>
     @Query("SELECT * FROM playlists WHERE id = :id") suspend fun playlist(id: String): MusicPlaylist?
     @Insert suspend fun insert(playlist: MusicPlaylist)
     @Query("UPDATE playlists SET name = :name WHERE id = :id") suspend fun renamePlaylist(id: String, name: String)
     @Query("DELETE FROM playlists WHERE id = :id") suspend fun deletePlaylist(id: String)
+    @Query("UPDATE playlists SET sortPosition = :position WHERE id = :id")
+    suspend fun setPlaylistPosition(id: String, position: Int)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun add(track: PlaylistTrack)
     @Query("DELETE FROM playlist_tracks WHERE playlist = :playlist AND song = :song") suspend fun remove(playlist: String, song: String)
     @Query("SELECT * FROM playlist_tracks ORDER BY added") fun tracks(): Flow<List<PlaylistTrack>>
@@ -110,6 +118,11 @@ internal class Collections(private val app: SaoreoApp) {
     }
     suspend fun renamePlaylist(id: String, name: String) = dao.renamePlaylist(id, collectionName(name))
     suspend fun deletePlaylist(id: String) = dao.deletePlaylist(id)
+    suspend fun reorderPlaylists(ids: List<String>) = app.database.withTransaction {
+        val current = dao.orderedPlaylistIds()
+        val order = (ids.filter { it in current } + current).distinct()
+        order.forEachIndexed { index, id -> dao.setPlaylistPosition(id, index) }
+    }
     suspend fun addSong(playlist: String, song: Download) {
         require(song.mime?.startsWith("audio/") == true && song.state == JobState.COMPLETE.name)
         dao.add(PlaylistTrack(playlist, song.id))

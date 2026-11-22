@@ -16,17 +16,22 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -39,11 +44,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -91,8 +101,12 @@ private suspend fun songTags(app: SaoreoApp, uri: String): SongTags = withContex
 }
 
 @Composable
-internal fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean) {
+internal fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean,
+                     modifier: Modifier = Modifier.size(size.dp),
+                     shape: Shape = RoundedCornerShape(if (size > 80) 26.dp else 14.dp),
+                     coverUrl: String? = null) {
     val art by produceState<android.graphics.Bitmap?>(null, uri, artwork, size) {
+        value = null
         value = if (uri == null || !artwork) null else withContext(Dispatchers.IO) {
             runCatching {
                 MediaMetadataRetriever().use { retriever ->
@@ -110,9 +124,10 @@ internal fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean) 
             }.getOrNull()
         }
     }
-    Box(Modifier.size(size.dp).clip(RoundedCornerShape(if (size > 80) 26.dp else 14.dp)), contentAlignment = Alignment.Center) {
-        RecordArt(Modifier.fillMaxSize(), uri?.hashCode() ?: 0)
-        if (art != null) AsyncImage(art, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+    Box(modifier.clip(shape), contentAlignment = Alignment.Center) {
+        RecordArt(Modifier.fillMaxSize(), uri?.hashCode() ?: coverUrl?.hashCode() ?: 0, shape)
+        val cover = art ?: coverUrl
+        if (cover != null) AsyncImage(cover, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
     }
 }
 
@@ -139,13 +154,25 @@ internal fun MusicMiniPlayer(app: SaoreoApp, player: MediaController?, onOpen: (
     var song by remember(player) { mutableStateOf(player.currentMediaItem) }
     var lastSong by remember(player) { mutableStateOf(player.currentMediaItem) }
     val reading = rememberPlayback(player)
-    var drag by remember { mutableFloatStateOf(0f) }
+    var drag by remember(player) { mutableFloatStateOf(0f) }
+    var dismissing by remember(player) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val offset by androidx.compose.animation.core.animateFloatAsState(drag, label = "Player dismissal")
+    var motion by remember(player) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun clear() {
+        player.stop()
+        player.clearMediaItems()
+        app.audioControl.sleepUntil.value = 0
+    }
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
-                song = player.currentMediaItem
+                val next = player.currentMediaItem
+                if (next != null && next != song) {
+                    motion?.cancel()
+                    drag = 0f
+                    dismissing = false
+                }
+                song = next
                 if (song != null) lastSong = song
             }
         }
@@ -155,16 +182,40 @@ internal fun MusicMiniPlayer(app: SaoreoApp, player: MediaController?, onOpen: (
     AnimatedVisibility(song != null, enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically { it },
         exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically { it }) {
         val track = lastSong
+        val trackUri = track?.mediaId
+        val cover by key(trackUri) {
+            produceState(track?.mediaMetadata?.artworkUri?.toString(), app, trackUri) {
+                if (value == null && trackUri != null) value = app.dao.byUri(trackUri)?.thumbnail
+            }
+        }
+        Box(Modifier.pointerInput(player) {
+            fun settle(dismiss: Boolean) {
+                if (dismissing) return
+                dismissing = dismiss
+                motion?.cancel()
+                val target = if (dismiss) maxOf(size.height.toFloat(), drag) else 0f
+                val trackOnRelease = song
+                motion = scope.launch {
+                    Animatable(drag).animateTo(target, tween(160)) { drag = value }
+                    if (dismiss && song == trackOnRelease) clear()
+                }
+            }
+            detectVerticalDragGestures(onDragStart = { if (!dismissing) motion?.cancel() },
+                onDragCancel = { settle(false) }, onDragEnd = { settle(drag >= 42.dp.toPx()) }) { change, amount ->
+                if (!dismissing) {
+                    change.consume()
+                    drag = (drag + amount).coerceAtLeast(0f)
+                }
+            }
+        }.semantics {
+            customActions = listOf(CustomAccessibilityAction("Clear mini-player") { clear(); true })
+        }) {
         Surface(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-            .offset { IntOffset(0, offset.roundToInt()) }.pointerInput(player) {
-                detectDragGesturesAfterLongPress(onDragStart = { drag = 0f }, onDragCancel = { drag = 0f }, onDragEnd = {
-                    if (drag > 64.dp.toPx()) { player.stop(); player.clearMediaItems(); app.audioControl.sleepUntil.value = 0 }
-                    drag = 0f
-                }) { change, amount -> change.consume(); drag = (drag + amount.y).coerceAtLeast(0f) }
-            }, color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(20.dp)) {
+            .offset { IntOffset(0, drag.roundToInt()) },
+            color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(20.dp)) {
             Column {
                 Row(Modifier.clickable(onClick = onOpen).padding(horizontal = 8.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Artwork(app, track?.mediaId, 36, true)
+                    Artwork(app, trackUri, 36, true, shape = CircleShape, coverUrl = cover)
                     Column(Modifier.weight(1f).padding(start = 10.dp, end = 2.dp)) {
                         Text(track?.mediaMetadata?.title?.toString() ?: "Audio", maxLines = 1,
                             style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, overflow = TextOverflow.Ellipsis)
@@ -193,6 +244,7 @@ internal fun MusicMiniPlayer(app: SaoreoApp, player: MediaController?, onOpen: (
                     progress = { (reading.position.toFloat() / reading.duration).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().height(2.dp), color = Lime, trackColor = Color.Transparent)
             }
+        }
         }
     }
 }
@@ -240,6 +292,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     val player = controller ?: standalone?.first
     val stateBySong = states.associateBy { it.song }
     val currentQueue = remember(player) { mutableStateOf(emptyList<MediaItem>()) }
+    var playbackRequested by remember(player) { mutableStateOf(false) }
     var currentUri by remember { mutableStateOf<String?>(null) }
     var shuffle by remember { mutableStateOf(false) }
     var repeat by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
@@ -247,6 +300,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         fun sync() {
             currentUri = player.currentMediaItem?.mediaId
             currentQueue.value = (0 until player.mediaItemCount).map(player::getMediaItemAt)
+            playbackRequested = player.playWhenReady && player.playbackState in setOf(Player.STATE_BUFFERING, Player.STATE_READY)
             shuffle = player.shuffleModeEnabled
             repeat = player.repeatMode
         }
@@ -313,12 +367,31 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         return if (section == "Artists") metadata?.artist ?: "Unknown artist" else metadata?.album ?: "Unknown album"
     }
     val playlist = playlists.firstOrNull { it.id == collection && section == "Playlists" }
+    val musicListState = rememberLazyListState()
+    val reorder = remember(musicListState) { PlaylistReorder(musicListState) }
+    val savedPlaylistOrder = playlists.map { it.id }
+    val playlistById = playlists.associateBy { it.id }
+    val shownPlaylistOrder = ((reorder.draft ?: emptyList()) + savedPlaylistOrder).distinct()
+    LaunchedEffect(savedPlaylistOrder, reorder.dragging) { reorder.acceptSaved(savedPlaylistOrder) }
+    val reorderEdge = with(LocalDensity.current) { 56.dp.toPx() }
+    if (!full && section == "Playlists" && playlist == null) PlaylistDragScroll(musicListState, reorder, reorderEdge)
+    fun savePlaylistOrder(order: List<String>) {
+        perform {
+            try { app.collections.reorderPlaylists(order) }
+            catch (error: Exception) { reorder.discard(order); throw error }
+        }
+    }
+    val playlistSongs = if (playlist == null) emptyList() else {
+        val byId = songs.associateBy { it.id }
+        membership.filter { it.playlist == playlist.id }.mapNotNull { byId[it.song] }
+    }
+    var playlistOptions by remember(playlist?.id) { mutableStateOf(false) }
     val matching = songs.filter { song ->
         val tag = tags[song.galleryUri]
         query.isBlank() || listOf(song.title, tag?.title, tag?.artist, tag?.album).filterNotNull().any { it.contains(query, true) }
     }
     val visible = when {
-        playlist != null -> membership.filter { it.playlist == playlist.id }.mapNotNull { ref -> matching.firstOrNull { it.id == ref.song } }
+        playlist != null -> if (query.isBlank()) playlistSongs else playlistSongs.filter { it in matching }
         albumOrArtist && collection != null -> matching.filter { group(it) == collection }
         section == "Liked" -> matching.filter { stateBySong[it.id]?.liked == true }
         section == "Recent" -> matching.filter { (stateBySong[it.id]?.played ?: 0) > 0 }.sortedByDescending { stateBySong[it.id]?.played }
@@ -331,6 +404,10 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         else -> if (playlist != null) rows else rows.sortedByDescending { it.created }
     } }
     val current = songs.firstOrNull { it.galleryUri == currentUri }
+    val queueIds = currentQueue.value.map { it.mediaId }
+    val ownsPlaylistPlayback = playlist != null && queueIds.isNotEmpty() && currentUri in queueIds &&
+        (queueIds == visible.map { it.galleryUri } || queueIds == playlistSongs.map { it.galleryUri })
+    val playlistPlaying = ownsPlaylistPlayback && playbackRequested
     val trackTitle = current?.let { tags[it.galleryUri]?.title ?: it.title }
         ?: player?.mediaMetadata?.title?.toString() ?: "Audio"
     val trackSubtitle = current?.let { tags[it.galleryUri]?.artist }
@@ -339,26 +416,62 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     BackHandler(full || collection != null) {
         if (full) full = false else collection = null
     }
-    Column(Modifier.fillMaxSize().animateContentSize().background(if (full) Brush.verticalGradient(listOf(
+    val showPlaylistCover = playlist != null && !full
+    Box(Modifier.fillMaxSize().background(if (full) Brush.verticalGradient(listOf(
         MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.background), endY = 1300f)
-        else Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background)))
+        else Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background)))) {
+    if (showPlaylistCover && playlist != null) {
+        val cover = playlistSongs.firstOrNull()
+        val base = MaterialTheme.colorScheme.background
+        val extraTop = if (embedded) 0.dp else WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding()
+        Box(Modifier.fillMaxWidth().height(330.dp + extraTop)) {
+            Artwork(app, cover?.galleryUri.takeIf { playlist.thumbnail == null }, 360, true,
+                modifier = Modifier.matchParentSize(), shape = RoundedCornerShape(0.dp),
+                coverUrl = playlist.thumbnail ?: cover?.thumbnail)
+            Box(Modifier.matchParentSize().background(Brush.verticalGradient(listOf(
+                Color(0xBD0D0B14), Color(0x480D0B14), Color(0x9D0D0B14), base,
+            ))))
+        }
+    }
+    Column(Modifier.fillMaxSize().animateContentSize()
         .then(if (embedded) Modifier else Modifier.safeDrawingPadding()).padding(horizontal = 24.dp)) {
+        CompositionLocalProvider(LocalContentColor provides if (showPlaylistCover) Color.White else LocalContentColor.current) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (!embedded || full || collection != null) IconButton({ if (full) full = false else if (collection != null) collection = null else close() }) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back")
             }
             Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
-                if (!embedded || full || collection != null) Text(if (full) "Now playing" else playlist?.name ?: collection ?: "Music",
+                if (!embedded || full || collection != null) Text(if (full) "Now playing" else if (playlist != null) "Playlist" else collection ?: "Music",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (!full) Text("${songs.size} songs", style = MaterialTheme.typography.bodySmall,
+                if (!full && playlist == null) Text("${songs.size} songs", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (!full) IconButton({ searching = !searching; if (!searching) query = "" }) { Icon(Icons.Outlined.Search, "Search music") }
+            if (!full) IconButton({ searching = !searching; if (!searching) query = "" }) { Icon(painterResource(R.drawable.ic_ui_search), "Search music") }
             if (!full) ChoiceMenu(sort, listOf("Date added", "Title", "Duration", "Artist"), { it }) { sort = it }
-            if (!full) IconButton({ import.launch(arrayOf("audio/*")) }, enabled = !importing) {
+            if (!full && playlist == null) IconButton({ import.launch(arrayOf("audio/*")) }, enabled = !importing) {
                 Icon(Icons.Outlined.Add, "Import audio")
             }
+            if (!full && playlist != null) Box {
+                IconButton({ playlistOptions = true }) { Icon(Icons.Outlined.MoreVert, "Playlist options") }
+                DropdownMenu(playlistOptions, { playlistOptions = false }) {
+                    DropdownMenuItem(text = { Text("Rename playlist") }, onClick = {
+                        playlistOptions = false
+                        form = playlist.name
+                    })
+                    playlist.sourceUrl?.let { url ->
+                        DropdownMenuItem(text = { Text("Open original playlist") }, onClick = {
+                            playlistOptions = false
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        })
+                    }
+                    DropdownMenuItem(text = { Text("Delete playlist") }, onClick = {
+                        playlistOptions = false
+                        deletePlaylist = playlist
+                    })
+                }
+            }
+        }
         }
         if (importing) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -372,9 +485,9 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
             AnimatedVisibility(searching) {
                 OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     placeholder = { Text("Search songs, artists, albums") }, shape = RoundedCornerShape(18.dp),
-                    leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true)
+                    leadingIcon = { Icon(painterResource(R.drawable.ic_ui_search), null) }, singleLine = true)
             }
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (playlist == null) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("Songs", "Playlists", "Artists", "Albums", "Liked", "Recent", "Most played").forEach { tab ->
                     FilterChip(section == tab, { section = tab; collection = null }, label = { Text(tab) },
                         shape = RoundedCornerShape(24.dp),
@@ -382,7 +495,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                             selectedLabelColor = Ink))
                 }
             }
-            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 16.dp),
+            LazyColumn(Modifier.weight(1f), state = musicListState, contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
                     section == "Playlists" && playlist == null -> {
@@ -397,17 +510,40 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                         if (playlists.isEmpty()) item {
                             EmptyState("Every mood needs a playlist.", "Create one, then add songs from your library.")
                         }
-                        items(playlists.filter { it.name.contains(query, true) }, key = { it.id }) { list ->
+                        items(shownPlaylistOrder.mapNotNull(playlistById::get).filter { it.name.contains(query, true) }, key = { it.id }) { list ->
+                            var actions by remember(list.id) { mutableStateOf(false) }
+                            val canReorder = query.isBlank() && playlists.size > 1
                             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer,
-                                modifier = Modifier.fillMaxWidth().clickable { collection = list.id }) {
-                                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                modifier = Modifier.fillMaxWidth().then(reorder.modifier(list.id))
+                                    .combinedClickable(onClick = { collection = list.id }, onLongClick = { actions = true },
+                                        onLongClickLabel = "Playlist actions")
+                                    .semantics {
+                                        if (canReorder) customActions = listOfNotNull(
+                                            if (shownPlaylistOrder.firstOrNull() != list.id) CustomAccessibilityAction("Move up") {
+                                                reorder.move(list.id, -1, savedPlaylistOrder)?.let(::savePlaylistOrder) != null
+                                            } else null,
+                                            if (shownPlaylistOrder.lastOrNull() != list.id) CustomAccessibilityAction("Move down") {
+                                                reorder.move(list.id, 1, savedPlaylistOrder)?.let(::savePlaylistOrder) != null
+                                            } else null,
+                                        )
+                                    }) {
+                                Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
                                     PlaylistArtwork(list.thumbnail, list.id.hashCode(), 70)
                                     Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Text(list.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                         Text("${membership.count { ref -> ref.playlist == list.id && songs.any { it.id == ref.song } }} tracks", style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
-                                    Icon(Icons.Outlined.PlayArrow, null)
+                                    Box {
+                                        if (canReorder) PlaylistDragHandle(reorder, list.id, savedPlaylistOrder, ::savePlaylistOrder)
+                                        DropdownMenu(actions, onDismissRequest = { actions = false }) {
+                                            DropdownMenuItem(text = { Text("Delete playlist") }, onClick = {
+                                                actions = false
+                                                deletePlaylist = list
+                                            })
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -419,22 +555,29 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                     }
                     else -> {
                         if (playlist != null) item {
-                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                            Column(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                PlaylistArtwork(playlist.thumbnail, playlist.id.hashCode(), 180)
-                                playlist.sourceUrl?.let { url -> TextButton({
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                }) { Text("Open original playlist") } }
-                                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button({ visible.firstOrNull()?.let { player?.shuffleModeEnabled = false; play(visible, it) } },
-                                        enabled = visible.isNotEmpty() && player != null) {
-                                        Icon(Icons.Outlined.PlayArrow, null); Text("Play")
+                                Column(Modifier.fillMaxWidth().heightIn(min = 206.dp)
+                                    .padding(horizontal = 12.dp, vertical = 14.dp),
+                                    verticalArrangement = Arrangement.Bottom) {
+                                    Text(playlist.name, style = MaterialTheme.typography.headlineMedium,
+                                        color = Color.White, fontWeight = FontWeight.SemiBold,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Text("${playlistSongs.size} ${if (playlistSongs.size == 1) "track" else "tracks"}",
+                                        color = Color(0xFFE0DDE6), style = MaterialTheme.typography.labelMedium)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Button({
+                                        if (playlistPlaying) player?.pause()
+                                        else if (ownsPlaylistPlayback) togglePlayback()
+                                        else visible.firstOrNull()?.let { player?.shuffleModeEnabled = false; play(visible, it) }
+                                    }, enabled = (ownsPlaylistPlayback || visible.isNotEmpty()) && player != null) {
+                                        Icon(painterResource(if (playlistPlaying) R.drawable.ic_media_pause else R.drawable.ic_media_play),
+                                            null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(if (playlistPlaying) "Pause" else "Play")
                                     }
                                     OutlinedButton({ addingTracks = true }) { Icon(Icons.Outlined.Add, null); Text("Add songs") }
-                                }
-                                Row {
-                                    TextButton({ form = playlist.name }) { Text("Rename") }
-                                    TextButton({ deletePlaylist = playlist }) { Text("Delete playlist") }
                                 }
                             }
                         } else if (visible.isNotEmpty()) item {
@@ -457,14 +600,23 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                             val metadata = tags[song.galleryUri]
                             ListItem(
                                 headlineContent = { Text(metadata?.title ?: song.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                supportingContent = { Text(listOfNotNull(metadata?.artist ?: "Unknown artist",
-                                    metadata?.duration?.takeIf { it > 0 }?.let(::playbackTime)).joinToString(" · "),
+                                supportingContent = { Text(listOfNotNull(metadata?.artist ?: song.artist ?: "Unknown artist",
+                                    metadata?.duration?.takeIf { playlist == null && it > 0 }?.let(::playbackTime)).joinToString(" · "),
                                     maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 modifier = Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = player != null) { play(visible, song) },
                                 colors = ListItemDefaults.colors(containerColor = if (currentUri == song.galleryUri)
                                     MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent),
-                                leadingContent = { Artwork(app, song.galleryUri, 54, true) },
-                                trailingContent = { IconButton({ songOptions = song }) { Icon(Icons.Outlined.MoreVert, "Track options") } },
+                                leadingContent = { Artwork(app, song.galleryUri, 40, true, shape = CircleShape, coverUrl = song.thumbnail) },
+                                trailingContent = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (playlist != null) {
+                                            val duration = metadata?.duration?.takeIf { it > 0 } ?: song.duration
+                                            if (duration > 0) Text(playbackTime(duration), style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        IconButton({ songOptions = song }) { Icon(Icons.Outlined.MoreVert, "Track options") }
+                                    }
+                                },
                             )
                         }
                     }
@@ -472,6 +624,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
             }
             if (!embedded) MusicMiniPlayer(app, player) { full = true }
         }
+    }
     }
     editing?.let { song ->
         EditTrackDialog(song, tags[song.galleryUri]?.title ?: song.title, tags[song.galleryUri]?.artist, tags[song.galleryUri]?.album,

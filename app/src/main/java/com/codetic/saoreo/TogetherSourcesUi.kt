@@ -1,6 +1,8 @@
 package com.codetic.saoreo
 
+import android.content.Intent
 import android.net.Uri
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -14,6 +16,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -36,27 +40,16 @@ internal fun SourceOption(title: String, subtitle: String, onClick: () -> Unit) 
 }
 
 @Composable
-internal fun TogetherSeekBar(position: Long, duration: Long, enabled: Boolean, onSeek: (Long) -> Unit) {
-    var dragged by remember { mutableStateOf<Float?>(null) }
-    if (duration <= 0) return
-    val fraction = (position.toFloat() / duration).coerceIn(0f, 1f)
-    Slider(
-        value = dragged ?: fraction,
-        onValueChange = { dragged = it },
-        onValueChangeFinished = {
-            if (enabled) dragged?.let { onSeek((it * duration).toLong()) }
-            dragged = null
-        },
-        enabled = enabled,
-        modifier = Modifier.fillMaxWidth(),
-    )
-}
-
-@Composable
 internal fun TogetherYouTubeBrowser(onDismiss: () -> Unit, onChoose: (id: String, live: Boolean) -> Boolean) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val choose by rememberUpdatedState(onChoose)
     var browser by remember { mutableStateOf<WebView?>(null) }
     var selected by remember { mutableStateOf(false) }
+    fun openSignedInYouTube(url: Uri = Uri.parse("https://www.youtube.com/")) {
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url)) }
+            .onFailure { toast(context, "YouTube could not be opened.") }
+    }
     fun select(url: String): Boolean {
         if (selected) return true
         val id = TogetherSources.youtube(url) ?: return false
@@ -74,9 +67,17 @@ internal fun TogetherYouTubeBrowser(onDismiss: () -> Unit, onChoose: (id: String
                     Text("Browse YouTube", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     IconButton(onDismiss) { Icon(Icons.Outlined.Close, "Close YouTube browser") }
                 }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton({ openSignedInYouTube() }) { Text("Signed-in YouTube") }
+                    TextButton({
+                        val link = clipboard.getText()?.text?.let(MediaLink::fromText)?.takeIf { it.source == Source.YOUTUBE }
+                        if (link == null || !select(link.url)) toast(context, "Copy a YouTube video link first.")
+                    }) { Text("Paste video link") }
+                }
                 AndroidView(
                     factory = { context ->
                         WebView(context).apply {
+                            CookieManager.getInstance().setAcceptCookie(true)
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             settings.allowFileAccess = false
@@ -87,6 +88,10 @@ internal fun TogetherYouTubeBrowser(onDismiss: () -> Unit, onChoose: (id: String
                                     if (!request.isForMainFrame) return false
                                     val uri = request.url
                                     if (uri.scheme != "https") return true
+                                    if (uri.host == "accounts.google.com") {
+                                        openSignedInYouTube(uri)
+                                        return true
+                                    }
                                     if (select(uri.toString())) return true
                                     return uri.host !in setOf("m.youtube.com", "www.youtube.com", "youtube.com")
                                 }
@@ -100,7 +105,11 @@ internal fun TogetherYouTubeBrowser(onDismiss: () -> Unit, onChoose: (id: String
                         }
                     },
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    onRelease = { it.stopLoading(); it.destroy() },
+                    onRelease = {
+                        CookieManager.getInstance().flush()
+                        it.stopLoading()
+                        it.destroy()
+                    },
                 )
             }
         }

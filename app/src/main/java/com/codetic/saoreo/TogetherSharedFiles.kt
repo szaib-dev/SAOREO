@@ -69,19 +69,19 @@ internal class TogetherSharedFiles(private val session: TogetherSession, private
         }
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val bytes = withContext(Dispatchers.IO) {
+                val payload = withContext(Dispatchers.IO) {
                     val asset = resolver.openAssetFileDescriptor(owned.second.uri, "r")
                         ?: throw IOException("The source file is unavailable.")
                     asset.use { descriptor -> descriptor.createInputStream().use { input ->
                         input.channel.position(descriptor.startOffset + offset)
                         val bytes = input.readNBytes(length)
                         if (bytes.size != length) throw IOException("The source file changed.")
-                        bytes
+                        Base64.encodeToString(bytes, Base64.NO_WRAP)
                     } }
                 }
                 ensureActive()
                 if (session.state.value.room == owned.first)
-                    session.send("fileChunk", JSONObject().put("request", id).put("data", Base64.encodeToString(bytes, Base64.NO_WRAP)))
+                    session.send("fileChunk", JSONObject().put("request", id).put("data", payload))
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) {
                 if (session.state.value.room == owned.first) session.send("fileChunk", JSONObject().put("request", id).put("error", true))

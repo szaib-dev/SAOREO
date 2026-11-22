@@ -22,9 +22,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,12 +33,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -50,6 +55,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.PI
+import kotlin.math.acos
+import kotlin.math.cos
+import kotlin.math.sin
 
 internal data class LyricLine(val time: Long?, val text: String)
 
@@ -106,11 +115,16 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
         }
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val artSize = minOf(maxWidth.value - 16, maxHeight.value * .43f).toInt().coerceIn(120, 300)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        val artSize = minOf(maxWidth.value - 20, maxHeight.value * .38f).toInt().coerceIn(104, 252)
+        val next = queue.getOrNull(player.nextMediaItemIndex)
+        val following = if (!shuffle && next != null) queue.getOrNull(player.nextMediaItemIndex + 1) else null
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             var drag by remember { mutableFloatStateOf(0f) }
-            Box(Modifier.padding(top = 6.dp).pointerInput(player) {
+            Box(Modifier.padding(top = 6.dp).width(artSize.dp).height(
+                (artSize + (if (next != null) 34 else 0) + (if (following != null) 19 else 0)).dp
+            ).pointerInput(player) {
                 detectHorizontalDragGestures(onDragStart = { drag = 0f }, onDragEnd = {
                     if (drag < -100 && player.hasNextMediaItem()) player.seekToNextMediaItem()
                     else if (drag > 100) player.seekToPrevious()
@@ -126,14 +140,28 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
                     if (vertical > 80.dp.toPx()) { player.stop(); player.clearMediaItems(); app.audioControl.sleepUntil.value = 0; onDismiss() }
                 }) { change, delta -> change.consume(); vertical += delta.y }
             }) {
-                Artwork(app, player.currentMediaItem?.mediaId, artSize, true)
+                if (following != null) {
+                    Artwork(app, following.mediaId, artSize - 52, true,
+                        Modifier.align(Alignment.TopCenter).size((artSize - 52).dp), CircleShape,
+                        following.mediaMetadata.artworkUri?.toString())
+                }
+                if (next != null) {
+                    Artwork(app, next.mediaId, artSize - 24, true,
+                        Modifier.align(Alignment.TopCenter).padding(top = if (following != null) 19.dp else 0.dp)
+                            .size((artSize - 24).dp), CircleShape, next.mediaMetadata.artworkUri?.toString())
+                }
+                Artwork(app, player.currentMediaItem?.mediaId, artSize, true,
+                    Modifier.align(Alignment.BottomCenter).size(artSize.dp)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+                    CircleShape, player.mediaMetadata.artworkUri?.toString() ?: song?.thumbnail)
                 androidx.compose.animation.AnimatedVisibility(seekFeedback != null, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
                     Surface(shape = CircleShape, color = Ink.copy(alpha = .86f)) {
                         Text(seekFeedback.orEmpty(), Modifier.padding(horizontal = 18.dp, vertical = 12.dp), color = Lime)
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            ArcTrackPosition(reading, player, Modifier.width((artSize + 16).dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -145,7 +173,7 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
                 }
             }
             reading.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            CompactSeek(reading, player)
+        }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 IconButton({ player.shuffleModeEnabled = !shuffle }) {
                     Icon(painterResource(R.drawable.ic_music_shuffle), if (shuffle) "Shuffle on" else "Shuffle off",
@@ -166,15 +194,21 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
                         tint = if (repeat != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                TextButton({ panel = "Queue" }) { Icon(Icons.AutoMirrored.Outlined.List, null, Modifier.size(18.dp)); Text(" Queue") }
-                TextButton({ panel = "Lyrics" }) { Text("Lyrics") }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                ChoiceMenu("${reading.speed}\u00d7", listOf(.5f, .75f, 1f, 1.25f, 1.5f, 1.75f, 2f), { "${it}\u00d7" }) { player.setPlaybackSpeed(it) }
-                ChoiceMenu(if (timer > 0) "Sleep ${durationLabel(((timer - now).coerceAtLeast(0) / 1000))}" else "Sleep timer",
-                    listOf(0, 15, 30, 45, 60, 90), { if (it == 0) "Off / cancel timer" else "$it minutes" }) {
-                    app.audioControl.sleepUntil.value = sleepDeadline(SystemClock.elapsedRealtime(), it)
+            Surface(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(22.dp)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton({ panel = "Queue" }) { Icon(painterResource(R.drawable.ic_music_queue), "Queue", Modifier.size(23.dp)) }
+                    IconButton({ panel = "Lyrics" }) { Icon(painterResource(R.drawable.ic_music_lyrics), "Lyrics", Modifier.size(23.dp)) }
+                    ChoiceMenu("${reading.speed}\u00d7 speed", listOf(.5f, .75f, 1f, 1.25f, 1.5f, 1.75f, 2f), { "${it}\u00d7" },
+                        icon = R.drawable.ic_music_speed, sheetTitle = "Playback speed", active = reading.speed != 1f) {
+                        player.setPlaybackSpeed(it)
+                    }
+                    ChoiceMenu(if (timer > 0) "Sleep timer · ${durationLabel(((timer - now).coerceAtLeast(0) / 1000))} remaining" else "Sleep timer",
+                        listOf(0, 15, 30, 45, 60, 90), { if (it == 0) "Off / cancel timer" else "$it minutes" },
+                        icon = R.drawable.ic_music_moon, sheetTitle = "Sleep timer", active = timer > 0) {
+                        app.audioControl.sleepUntil.value = sleepDeadline(SystemClock.elapsedRealtime(), it)
+                    }
                 }
             }
         }
@@ -212,6 +246,65 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
             }
         }
     } }
+}
+
+@Composable
+private fun ArcTrackPosition(reading: Playback, player: Player, modifier: Modifier = Modifier) {
+    val duration = reading.duration.coerceAtLeast(1).toFloat()
+    val seekable = reading.duration > 0 && player.isCurrentMediaItemSeekable
+    var preview by remember(player.currentMediaItem?.mediaId) { mutableStateOf<Float?>(null) }
+    val position = (preview ?: reading.position.toFloat()).coerceIn(0f, duration)
+    val fraction = position / duration
+    val trackColor = MaterialTheme.colorScheme.outlineVariant
+    val activeColor = MaterialTheme.colorScheme.primary
+    val background = MaterialTheme.colorScheme.background
+    val scrub = if (seekable) Modifier
+        .pointerInput(player, duration) {
+            detectTapGestures { point ->
+                player.seekTo(arcPosition(point.x, size.width.toFloat(), 10.dp.toPx(), duration).toLong())
+            }
+        }
+        .pointerInput(player, duration) {
+            detectHorizontalDragGestures(
+                onDragCancel = { preview = null },
+                onDragEnd = { preview?.let { player.seekTo(it.toLong()) }; preview = null },
+            ) { change, _ ->
+                change.consume()
+                preview = arcPosition(change.position.x, size.width.toFloat(), 10.dp.toPx(), duration)
+            }
+        } else Modifier
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Canvas(Modifier.fillMaxWidth().height(48.dp).then(scrub).semantics {
+            contentDescription = "Track position"
+            progressBarRangeInfo = ProgressBarRangeInfo(position, 0f..duration)
+            if (seekable) setProgress { target ->
+                player.seekTo(target.coerceIn(0f, duration).toLong())
+                true
+            }
+        }) {
+            val inset = 10.dp.toPx()
+            val radiusX = (size.width / 2f - inset).coerceAtLeast(1f)
+            val radiusY = size.height - 15.dp.toPx()
+            val center = Offset(size.width / 2f, 7.dp.toPx())
+            val arcTop = Offset(center.x - radiusX, center.y - radiusY)
+            val arcSize = Size(radiusX * 2, radiusY * 2)
+            val stroke = Stroke(3.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(trackColor, 180f, -180f, false, arcTop, arcSize, style = stroke)
+            if (fraction > 0f) drawArc(activeColor, 180f, -180f * fraction, false, arcTop, arcSize, style = stroke)
+            val angle = PI * (1 - fraction)
+            val thumb = center + Offset(radiusX * cos(angle).toFloat(), radiusY * sin(angle).toFloat())
+            drawCircle(activeColor, 6.dp.toPx(), thumb)
+            drawCircle(background, 3.dp.toPx(), thumb)
+        }
+        Text("${playbackTime(position.toLong())} / ${playbackTime(reading.duration)}",
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+private fun arcPosition(x: Float, width: Float, inset: Float, duration: Float): Float {
+    val radius = (width / 2f - inset).coerceAtLeast(1f)
+    val cosine = ((x - width / 2f) / radius).coerceIn(-1f, 1f)
+    return ((1.0 - acos(cosine.toDouble()) / PI) * duration).toFloat()
 }
 
 internal fun nextRepeatMode(mode: Int): Int = when (mode) { Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL; Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE; else -> Player.REPEAT_MODE_OFF }
