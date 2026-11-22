@@ -395,7 +395,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String = ""
                                 }
                             }
                             if (calling.active) TextButton({ callView = true }) { Text("Full call") }
-                        if (calling.active) Text("${calling.connection} \u00b7 ${calling.output} \u00b7 foreground call", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (calling.active) Text("${calling.connection} \u00b7 ${calling.output} \u00b7 foreground call", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                                 reactions.forEach { (key, glyph) -> TextButton({ session.send("reaction", JSONObject().put("emoji", key)) }, enabled = room.connected,
                                     contentPadding = PaddingValues(0.dp), modifier = Modifier.size(44.dp)) { Text(glyph, fontSize = 23.sp) } }

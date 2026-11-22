@@ -30,14 +30,16 @@ class LibraryMigrationTest {
             db.execSQL("INSERT INTO playlist_tracks VALUES ('mix','import',1)")
             db.execSQL("INSERT INTO song_state VALUES ('import',1,123)")
         }
-        helper.runMigrationsAndValidate(name, 3, true, libraryMigration).close()
-        val db = Room.databaseBuilder(app, DownloadDb::class.java, name).addMigrations(libraryMigration).build()
+        helper.runMigrationsAndValidate(name, 4, true, libraryMigration, playlistArtworkMigration).close()
+        val db = Room.databaseBuilder(app, DownloadDb::class.java, name).addMigrations(libraryMigration, playlistArtworkMigration).build()
         try {
             assertEquals(listOf("download"), db.downloads().observe().first().map { it.id })
             assertEquals(3, db.downloads().audio().first().size)
             assertEquals("IMPORTED", db.downloads().find("import")?.origin)
             assertEquals(1, db.downloads().videoLibrary().first().size)
             assertEquals("mix", db.collections().tracks().first().single().playlist)
+            assertNull(db.collections().playlist("mix")?.thumbnail)
+            assertNull(db.collections().playlist("mix")?.sourceUrl)
             assertTrue(db.collections().songStates().first().single().liked)
             assertEquals(1, db.collections().songStates().first().single().playCount)
             db.downloads().hideAudioHistory(); db.downloads().clear()

@@ -169,9 +169,8 @@ class ShareActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 val settings = app.preferences.flow.first()
-                if (uri == null && settings.autoShare) {
-                    if (link == null) toast(this@ShareActivity, if (playlist != null)
-                        "Use Ask before downloading to choose playlist items." else "Share a supported media link.")
+                if (uri == null && settings.autoShare && playlist == null && text?.let(::spotifyPlaylistUrl) == null) {
+                    if (link == null) toast(this@ShareActivity, "Share a supported media link.")
                     else {
                         app.downloads.enqueue(link, settings.copy(quality = settings.downloadQuality()), null, null,
                             DownloadOptions(settings.destination(instant = true),
@@ -331,7 +330,8 @@ internal fun LinkPanel(
     var audioPreset by rememberSaveable(link?.url) { mutableStateOf<Boolean?>(null) }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val playlistLink = remember(initial) { supportedPlaylist(initial) }
-    var playlistOpen by rememberSaveable(initial) { mutableStateOf(false) }
+    val spotifyUrl = remember(initial) { spotifyPlaylistUrl(initial) }
+    var playlistOpen by rememberSaveable(initial) { mutableStateOf(playlistLink != null || spotifyUrl != null) }
     var folder by rememberSaveable(link?.url, settings.destination()) { mutableStateOf(settings.destination()) }
     var playlist by rememberSaveable(link?.url, settings.defaultPlaylist) { mutableStateOf(settings.defaultPlaylist) }
     var bitrate by rememberSaveable(link?.url, settings.audioBitrate) { mutableIntStateOf(settings.audioBitrate) }
@@ -389,7 +389,7 @@ internal fun LinkPanel(
     }
 
     LaunchedEffect(link, revision, settings.timeout) {
-        if (link == null) return@LaunchedEffect
+        if (link == null || playlistLink != null || spotifyUrl != null) return@LaunchedEffect
         val trace = app.youtubeDiagnostics.open(link.source, if (share) "share" else "home")
         val timingStart = SystemClock.elapsedRealtimeNanos()
         val debounceAt = SystemClock.elapsedRealtimeNanos()
@@ -461,7 +461,7 @@ internal fun LinkPanel(
             }
         }
     }
-    if (link != null) {
+    if (link != null && playlistLink == null && spotifyUrl == null) {
         val result = preview
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
             Thumb(result?.thumbnail, Modifier.size(54.dp).clip(RoundedCornerShape(8.dp)))
@@ -542,14 +542,14 @@ internal fun LinkPanel(
             TextButton(onClick = { revision++ }) { Text("Retry preview") }
         }
         actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    } else if (!share && playlistLink == null) {
+    } else if (!share && playlistLink == null && spotifyUrl == null) {
         if (initial.isNotBlank()) Text("Enter a supported media link.", color = MaterialTheme.colorScheme.error)
         else Text("YouTube, Instagram, TikTok, X, Snapchat and Pinterest",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    if (playlistLink != null) {
+    if (playlistLink != null || spotifyUrl != null) {
         OutlinedButton({ playlistOpen = true }, Modifier.fillMaxWidth()) { Text("Choose playlist items") }
-        if (playlistOpen) PlaylistDownloadDialog(app, settings, playlistLink, { playlistOpen = false }, close.takeIf { share })
+        if (playlistOpen) PlaylistDownloadDialog(app, settings, playlistLink, { playlistOpen = false }, close.takeIf { share }, spotifyUrl)
     }
 
 }

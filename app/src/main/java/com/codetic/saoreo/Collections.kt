@@ -26,7 +26,7 @@ import java.util.UUID
 internal data class DownloadFolder(@PrimaryKey val id: String, val parent: String, val name: String)
 
 @Entity(tableName = "playlists")
-internal data class MusicPlaylist(@PrimaryKey val id: String, val name: String)
+internal data class MusicPlaylist(@PrimaryKey val id: String, val name: String, val thumbnail: String? = null, val sourceUrl: String? = null)
 
 @Entity(tableName = "playlist_tracks", primaryKeys = ["playlist", "song"],
     foreignKeys = [
@@ -105,7 +105,7 @@ internal class Collections(private val app: SaoreoApp) {
             ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: proposed
         app.dao.rename(item.id, actual.substringBeforeLast('.', actual))
     }
-    suspend fun newPlaylist(name: String) = MusicPlaylist(UUID.randomUUID().toString(), collectionName(name)).also {
+    suspend fun newPlaylist(name: String, thumbnail: String? = null, sourceUrl: String? = null) = MusicPlaylist(UUID.randomUUID().toString(), collectionName(name), thumbnail, sourceUrl).also {
         dao.insert(it)
     }
     suspend fun renamePlaylist(id: String, name: String) = dao.renamePlaylist(id, collectionName(name))
@@ -190,6 +190,10 @@ internal data class DownloadOptions(
     val playlist: String? = null,
     val section: MediaSection? = null,
     val bitrate: Int? = null,
+    val musicTitle: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val playlistPosition: Long? = null,
 )
 
 internal fun Settings.destination(instant: Boolean = false): String? = when {

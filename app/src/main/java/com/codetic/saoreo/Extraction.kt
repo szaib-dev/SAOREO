@@ -153,23 +153,28 @@ class Extractor(private val context: Context) {
 
     fun clearCache() = cache.clear()
 
-    internal suspend fun playlistItems(link: MediaLink, timeout: Int): List<RemotePlaylistItem> {
+    internal suspend fun playlistDetails(link: MediaLink, timeout: Int): RemotePlaylist {
         val json = run(link, timeout, playlist = true) {
             addOption("--flat-playlist")
             addOption("--skip-download")
             addOption("--dump-single-json")
+            addOption("--ignore-errors")
         }
-        val entries = JSONObject(json.trim()).optJSONArray("entries") ?: return emptyList()
-        return (0 until minOf(entries.length(), 100)).map { index ->
-            val row = entries.optJSONObject(index)
-            val id = row?.optString("id")?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{11}")) }
-            val availability = row?.optString("availability")
-            val title = row?.optString("title")?.take(240).orEmpty().ifBlank { "Item ${index + 1}" }
-            val available = id != null && availability !in setOf("private", "needs_auth", "premium_only", "subscriber_only") &&
-                title !in setOf("[Private video]", "[Deleted video]")
-            RemotePlaylistItem(index, if (available) title else "$title · Unavailable",
-                if (available) MediaLink("https://www.youtube.com/watch?v=$id", Source.YOUTUBE) else null)
+        return youtubePlaylist(JSONObject(json.trim()), link.url)
+    }
+
+    internal suspend fun playlistItems(link: MediaLink, timeout: Int): List<RemotePlaylistItem> =
+        playlistDetails(link, timeout).items
+
+    internal suspend fun matchSong(item: RemotePlaylistItem, timeout: Int): MediaLink {
+        val query = "${item.title} ${item.artist} official audio".take(500)
+        val json = run(MediaLink("ytsearch5:$query", Source.YOUTUBE), timeout, playlist = true) {
+            addOption("--flat-playlist")
+            addOption("--skip-download")
+            addOption("--dump-single-json")
         }
+        return bestSongMatch(item, youtubePlaylist(JSONObject(json.trim()), "").items)?.link
+            ?: throw IOException("No close YouTube match for ${item.title}")
     }
 
     internal suspend fun downloadYoutube(
@@ -248,7 +253,12 @@ class Extractor(private val context: Context) {
                     progress(TransferProgress("Processing downloaded media"))
                 }
             }) {
-                addOption("-f", selector ?: id)
+                val freshInstagram = link.source == Source.INSTAGRAM && info == null
+                addOption("-f", if (freshInstagram) {
+                    if (choice.audioOnly) "bestaudio/best" else "bestvideo+bestaudio/best"
+                } else selector ?: id)
+                if (freshInstagram) addOption("-S", listOfNotNull(choice.height?.let { "res:$it" },
+                    "vcodec:h264", "acodec:aac").joinToString(","))
                 if (link.source == Source.YOUTUBE) addOption("--check-formats")
                 if (resultInfo != null) {
                     addOption("--no-simulate")
@@ -276,7 +286,7 @@ class Extractor(private val context: Context) {
                     if (bitrate == null) addOption("--audio-quality", 0) else addOption("--audio-quality", "${bitrate}K")
                 } else if (choice.extension == "mp4") {
                     if (selector != null) addOption("--merge-output-format", "mp4/mkv")
-                    else if ('+' in id) addOption("--merge-output-format", "mp4")
+                    else if ('+' in id || freshInstagram) addOption("--merge-output-format", "mp4")
                     addOption("--recode-video", "mp4")
                 }
             } }
@@ -296,12 +306,12 @@ class Extractor(private val context: Context) {
         firstWrite.startWatching()
         try {
             removeErrorDocuments(directory)
-            completedMedia(directory, choice)?.let { return it }
+            completedMedia(directory, choice, link.source)?.let { return it }
             if (selector == null && choice.reusableStreams.map { it.id } == id.split('+')) {
                 val info = withContext(Dispatchers.IO) { writeStreamInfo(choice) }
                 try {
                     execute(info)
-                    return completedMedia(directory, choice) ?: throw InvalidMediaException()
+                    return completedMedia(directory, choice, link.source) ?: throw InvalidMediaException()
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (failure: Exception) {
@@ -313,20 +323,22 @@ class Extractor(private val context: Context) {
             }
             resultInfo?.delete()
             execute(null)
-            return completedMedia(directory, choice) ?: throw InvalidMediaException()
+            return completedMedia(directory, choice, link.source) ?: throw InvalidMediaException()
         } finally {
             removeErrorDocuments(directory)
             firstWrite.stopWatching()
         }
     }
 
-    private suspend fun completedMedia(directory: File, choice: Choice): File? = withContext(Dispatchers.IO) {
+    private suspend fun completedMedia(directory: File, choice: Choice, source: Source): File? = withContext(Dispatchers.IO) {
         directory.listFiles().orEmpty().firstNotNullOfOrNull { file ->
             if (!file.isFile || file.nameWithoutExtension != "media") return@firstNotNullOfOrNull null
             val mime = mimeFor(file.extension, choice.audioOnly)
             if (file.extension != choice.extension) return@firstNotNullOfOrNull null
             try {
-                verifyDownloadedMedia(file, mime ?: throw InvalidMediaException(), choice.requiresAudio)
+                if (source == Source.INSTAGRAM && !choice.audioOnly && file.extension == "mp4")
+                    prepareInstagramVideo(context, file, choice.requiresAudio)
+                else verifyDownloadedMedia(file, mime ?: throw InvalidMediaException(), choice.requiresAudio)
                 file
             } catch (_: InvalidMediaException) {
                 if (!file.delete() && file.exists()) throw IOException("Could not remove invalid completed media")
@@ -404,7 +416,7 @@ class Extractor(private val context: Context) {
                                         replayInfo?.let { addOption("--load-info-json", it.absolutePath) }
                                         addOption("--ignore-config")
                                         addOption(if (playlist) "--yes-playlist" else "--no-playlist")
-                                        addOption("--playlist-end", if (playlist) 100 else 1)
+                                        if (!playlist) addOption("--playlist-end", 1)
                                         addOption(if (trace == null) "--no-warnings" else "--verbose")
                                         addOption("--no-colors")
                                         addOption("--cache-dir", File(context.cacheDir, "extractor").absolutePath)

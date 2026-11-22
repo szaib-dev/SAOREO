@@ -66,6 +66,7 @@ class DownloadQueue(private val app: SaoreoApp) {
             choice = choice?.id, quality = settings.quality.name,
             detail = choice?.description(), folder = options.folder, targetPlaylist = options.playlist,
             clipStart = options.section?.start, clipEnd = options.section?.end, audioBitrate = options.bitrate,
+            localTitle = options.musicTitle, artist = options.artist, album = options.album,
         )
         val existing = app.dao.activeFor(item.source).firstOrNull {
             MediaLink.parse(it.url)?.metadataKey() == link.metadataKey() && it.choice == item.choice &&
@@ -74,7 +75,11 @@ class DownloadQueue(private val app: SaoreoApp) {
         }
         if (existing != null) return@withLock existing.id
         withContext(NonCancellable) {
-            app.dao.insert(item)
+            app.database.withTransaction {
+                app.dao.insert(item)
+                if (options.playlist != null && options.playlistPosition != null)
+                    app.collections.dao.add(PlaylistTrack(options.playlist, item.id, options.playlistPosition))
+            }
             schedule(item, settings)
         }
         Log.i("SAOREO", "job_accept_ms=${SystemClock.elapsedRealtime() - started}")
@@ -269,13 +274,14 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     val file = downloadDirect(instagramStream.url, link.source, "mp4", workspace,
                         MAX_DIRECT_VIDEO, settings.resume, progressValue::set, instagramStream.headers)
                     try {
-                        withContext(Dispatchers.IO) { verifyDownloadedMedia(file, "video/mp4", choice.requiresAudio) }
+                        prepareInstagramVideo(app, file, choice.requiresAudio)
                         return file
                     } catch (failure: InvalidMediaException) {
                         file.delete()
                         throw failure
                     }
                 } catch (failure: IOException) {
+                    app.extractor.clearCache()
                     Log.i("SAOREO", "Instagram CDN transfer failed; resolving with extractor")
                 }
             }

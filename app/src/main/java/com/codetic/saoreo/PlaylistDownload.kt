@@ -1,6 +1,8 @@
 package com.codetic.saoreo
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -11,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.net.URI
+import androidx.compose.ui.draw.clip
 
 internal fun supportedPlaylist(text: String): MediaLink? {
     if (text.length > 16_384) return null
@@ -25,89 +28,149 @@ internal fun supportedPlaylist(text: String): MediaLink? {
     }
 }
 
-internal data class RemotePlaylistItem(val key: Int, val title: String, val link: MediaLink?)
-
 @Composable
-internal fun PlaylistDownloadDialog(app: SaoreoApp, settings: Settings, link: MediaLink, close: () -> Unit,
-                                    finishShare: (() -> Unit)?) {
-    var items by remember { mutableStateOf<List<RemotePlaylistItem>?>(null) }
-    var selected by remember { mutableStateOf(setOf<Int>()) }
-    var audio by rememberSaveable { mutableStateOf(settings.defaultAudio) }
+internal fun PlaylistDownloadDialog(app: SaoreoApp, settings: Settings, link: MediaLink?, close: () -> Unit,
+                                    finishShare: (() -> Unit)?, spotifyUrl: String? = null) {
+    var remote by remember(link, spotifyUrl) { mutableStateOf<RemotePlaylist?>(null) }
+    var selected by rememberSaveable { mutableStateOf(setOf<Int>()) }
+    var audio by rememberSaveable { mutableStateOf(true) }
     var quality by rememberSaveable { mutableStateOf(settings.downloadQuality(false)) }
     var bitrate by rememberSaveable { mutableIntStateOf(settings.audioBitrate) }
     var folder by rememberSaveable { mutableStateOf(settings.destination()) }
-    var playlist by rememberSaveable { mutableStateOf(settings.defaultPlaylist) }
+    var playlist by rememberSaveable { mutableStateOf<String?>(null) }
+    var createdPlaylist by rememberSaveable { mutableStateOf<String?>(null) }
+    var createPlaylist by rememberSaveable { mutableStateOf(true) }
+    var name by rememberSaveable { mutableStateOf("") }
+    val orderStart = rememberSaveable { System.currentTimeMillis() }
+    var queueJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var advanced by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var attempt by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
-    var queueReport by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var completed by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    LaunchedEffect(link, attempt) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(link, spotifyUrl, attempt) {
         error = null
-        try { items = app.extractor.playlistItems(link, settings.timeout) }
-        catch (cancel: CancellationException) {
+        try {
+            remote = if (spotifyUrl != null) loadSpotifyPlaylist(spotifyUrl)
+                else app.extractor.playlistDetails(requireNotNull(link), settings.timeout)
+            if (name.isBlank()) name = safeName(remote!!.title).take(80)
+        } catch (cancel: CancellationException) {
             if (cancel is kotlinx.coroutines.TimeoutCancellationException) error = "The playlist took too long to load."
             else throw cancel
-        } catch (failure: Exception) { error = mediaFailure(failure.message) }
+        } catch (failure: Exception) { error = failure.message ?: "Could not load this playlist." }
     }
-    AlertDialog(onDismissRequest = { if (!busy) close() }, title = { Text("Download playlist items") }, text = {
-        Column(Modifier.heightIn(max = 515.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val result = items
+    AlertDialog(onDismissRequest = { if (!busy) close() }, title = { Text("Make it your mix") }, text = {
+        Column(Modifier.heightIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val result = remote
             if (result == null) {
                 if (error == null) LinearProgressIndicator(Modifier.fillMaxWidth())
                 else { Text(error.orEmpty()); TextButton({ attempt++ }) { Text("Retry") } }
-            } else if (result.isEmpty()) Text("No accessible items were returned.")
-            else {
-                Text("Showing up to 100 items. Download progress and item failures appear in Downloads.",
-                    style = MaterialTheme.typography.bodySmall)
-                Row {
-                    TextButton({ selected = result.filter { it.link != null }.map { it.key }.toSet() }) { Text("Select all") }
-                    TextButton({ selected = emptySet() }) { Text("Clear") }
+            } else {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    PlaylistArtwork(result.thumbnail, result.title.hashCode(), 76)
+                    Column(Modifier.weight(1f)) {
+                        Text(result.title, style = MaterialTheme.typography.titleMedium, maxLines = 2)
+                        Text("${result.items.size} tracks · ${selected.size} selected", style = MaterialTheme.typography.bodySmall)
+                        TextButton({ context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(result.sourceUrl))) }) { Text(if (spotifyUrl != null) "Open in Spotify" else "Open on YouTube") }
+                    }
                 }
-                LazyColumn(Modifier.weight(1f, fill = false)) {
-                    items(result, key = { it.key }) { item ->
+                result.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                if (result.items.isEmpty()) Text("No accessible tracks were returned.")
+                Row {
+                    TextButton({ selected = result.items.filter { it.selectable }.map { it.key }.toSet() }, enabled = !busy && !completed) { Text("Select all") }
+                    TextButton({ selected = emptySet() }, enabled = !busy && !completed) { Text("Clear") }
+                }
+                LazyColumn(Modifier.weight(1f)) {
+                    items(result.items, key = { it.key }) { item ->
                         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Checkbox(item.key in selected,
-                                { checked -> selected = if (checked) selected + item.key else selected - item.key },
-                                enabled = item.link != null && !busy)
-                            Text(item.title, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            Checkbox(item.key in selected, { checked -> selected = if (checked) selected + item.key else selected - item.key },
+                                enabled = item.selectable && !busy && !completed)
+                            Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                                Text(item.title, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                Text(if (!item.selectable) "Unavailable" else item.artist, style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            }
                         }
                     }
                 }
-                if (queueReport == null) {
-                    ChoiceMenu(if (audio) "MP3 audio" else "MP4 video", listOf(false, true),
-                        { if (it) "MP3 audio" else "MP4 video" }) { audio = it }
-                    if (!audio) ChoiceMenu(quality.label, Quality.entries.filter { it !in listOf(Quality.ASK, Quality.AUDIO) },
-                        { it.label }) { quality = it }
-                    DestinationAndPlaylist(app, settings, audio, folder, playlist, bitrate,
-                        { folder = it }, { playlist = it }, { bitrate = it })
+                if (!completed) {
+                    TextButton({ advanced = !advanced }, enabled = !busy) { Text(if (audio) "MP3 audio · Download options" else "MP4 video · Download options") }
+                    if (audio) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Checkbox(createPlaylist, { createPlaylist = it }, enabled = !busy)
+                        Text("Create a playlist in Music")
+                    }
                 }
-                queueReport?.let { Text(it) }
+                status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         }
     }, confirmButton = {
-        TextButton(enabled = !busy && (selected.isNotEmpty() || queueReport != null), onClick = {
-            if (queueReport != null) { close(); finishShare?.invoke(); return@TextButton }
-            scope.launch {
-                busy = true
-                val failures = mutableListOf<String>()
-                val targets = items.orEmpty().filter { it.key in selected }
-                val request = settings.copy(quality = if (audio) Quality.AUDIO else quality)
-                for (item in targets) {
-                    val media = item.link ?: continue
-                    try {
-                        app.downloads.enqueue(media, request, Preview(item.title, null, null, emptyList()), null,
-                            DownloadOptions(folder.takeIf { settings.folderOrganization }, playlist.takeIf { audio }, bitrate = bitrate))
-                    } catch (cancel: CancellationException) { throw cancel }
-                    catch (_: Exception) { failures.add(item.title) }
-                }
-                val queued = targets.size - failures.size
-                queueReport = "$queued queued." + if (failures.isEmpty()) "" else
-                    " Couldn’t queue ${failures.size}: ${failures.take(4).joinToString()}."
-                if (queued > 0 && settings.folderOrganization && settings.rememberFolder)
-                    runCatching { app.preferences.set(SettingKeys.lastFolder, folder.orEmpty()) }
-                busy = false
+        TextButton(enabled = !busy && (completed || selected.isNotEmpty() && (!audio || !createPlaylist || name.isNotBlank())), onClick = {
+            if (completed) { close(); finishShare?.invoke(); return@TextButton }
+            queueJob = scope.launch {
+                busy = true; error = null
+                try {
+                    val result = requireNotNull(remote)
+                    if (audio && createPlaylist && createdPlaylist == null)
+                        createdPlaylist = app.collections.newPlaylist(name, result.thumbnail, result.sourceUrl).id
+                    val destinationPlaylist = if (createPlaylist) createdPlaylist else playlist
+                    val targets = result.items.filter { it.key in selected && it.selectable }
+                    val failures = mutableListOf<RemotePlaylistItem>()
+                    var queued = 0
+                    for ((index, item) in targets.withIndex()) {
+                        status = "${if (spotifyUrl != null) "Matching and queuing" else "Queuing"} ${index + 1} of ${targets.size}: ${item.title}"
+                        try {
+                            val media = item.link ?: app.extractor.matchSong(item, settings.timeout)
+                            app.downloads.enqueue(media, settings.copy(quality = if (audio) Quality.AUDIO else quality),
+                                Preview(item.title, item.thumbnail, item.duration, emptyList()), null,
+                                DownloadOptions(folder.takeIf { settings.folderOrganization }, destinationPlaylist.takeIf { audio }, bitrate = bitrate,
+                                    musicTitle = item.title.takeIf { spotifyUrl != null },
+                                    artist = item.artist.takeIf { spotifyUrl != null }, album = name.takeIf { audio },
+                                    playlistPosition = (orderStart + item.key).takeIf { audio && destinationPlaylist != null }))
+                            selected = selected - item.key
+                            queued++
+                        } catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { failures.add(item) }
+                    }
+                    selected = failures.map { it.key }.toSet()
+                    completed = failures.isEmpty()
+                    status = "$queued queued. Download progress is in Downloads." + if (failures.isEmpty()) "" else
+                        " ${failures.size} could not be matched or queued. Retry the remaining selection."
+                    if (queued > 0 && settings.folderOrganization && settings.rememberFolder)
+                        app.preferences.set(SettingKeys.lastFolder, folder.orEmpty())
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) { error = failure.message ?: "Could not create the playlist." }
+                finally { busy = false }
             }
-        }) { Text(if (queueReport != null) "Done" else if (busy) "Queuing…" else "Download ${selected.size}") }
-    }, dismissButton = { if (queueReport == null) TextButton(close, enabled = !busy) { Text("Cancel") } })
+        }) { Text(if (completed) "Done" else if (busy) "Preparing…" else "Download ${selected.size}") }
+    }, dismissButton = { if (!completed) TextButton({
+        if (busy) { queueJob?.cancel(); status = "Queuing stopped. Existing downloads will continue. Remaining tracks stay selected." }
+        else close()
+    }) { Text(if (busy) "Stop queuing" else "Cancel") } })
+    if (advanced) AlertDialog(onDismissRequest = { advanced = false }, title = { Text("Download options") }, text = {
+        Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (spotifyUrl == null) ChoiceMenu(if (audio) "MP3 · Save to Music" else "MP4 · Save videos", listOf(false, true),
+                { if (it) "MP3 · Save to Music" else "MP4 · Save videos" }) { audio = it }
+            if (!audio) ChoiceMenu(quality.label, Quality.entries.filter { it !in listOf(Quality.ASK, Quality.AUDIO) },
+                { it.label }) { quality = it }
+            if (audio && createPlaylist) OutlinedTextField(name, { name = it.take(80) },
+                singleLine = true, label = { Text("Playlist name") })
+            DestinationAndPlaylist(app, settings, audio, folder, if (createPlaylist) null else playlist, bitrate,
+                { folder = it }, { playlist = it; createPlaylist = false }, { bitrate = it })
+        }
+    }, confirmButton = { TextButton({ advanced = false }) { Text("Done") } })
+}
+
+@Composable
+internal fun PlaylistArtwork(url: String?, seed: Int, size: Int) {
+    Box(Modifier.size(size.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(18.dp))) {
+        RecordArt(Modifier.fillMaxSize(), seed)
+        if (url != null) coil.compose.AsyncImage(url, null, Modifier.fillMaxSize(),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+    }
 }

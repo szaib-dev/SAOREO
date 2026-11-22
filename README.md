@@ -44,3 +44,11 @@ Play completed video and audio from Downloads. Use **Choose Video to Convert** t
 ## SAOREO 2.2
 
 See [the 2.2 upgrade notes](docs/UPGRADE_2_2.md) for the Transcript tools, progress notifications, media and Status changes, pinned native dependencies, and verification results.
+
+## Playlist imports and Instagram recovery (2.9.1)
+
+Paste or share a YouTube playlist to choose all or individual tracks, save MP3 or MP4, and create a Music playlist with artwork and the original track order. Music > Playlists also includes a playlist import entry point.
+
+Public Spotify playlist links import the track details and cover; selected audio uses YouTube matches. This does not download audio from Spotify. The public embed can expose only part of a long playlist, which the picker explains. Full authenticated Spotify pagination is not configured.
+
+Instagram downloads now try MP4 remuxing and H.264/AAC conversion when Android rejects a downloaded container, and refresh format selection during extractor recovery. See [playlist imports and recovery](docs/PLAYLIST_IMPORTS.md) for behavior and limitations.

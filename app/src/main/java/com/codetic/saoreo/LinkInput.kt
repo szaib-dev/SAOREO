@@ -48,6 +48,7 @@ internal fun LinkInput(app: SaoreoApp, settings: Settings, modifier: Modifier = 
     }
     val link = remember(text) { MediaLink.fromText(text.trim()) }
     val playlist = remember(text) { supportedPlaylist(text.trim()) }
+    val spotifyUrl = remember(text) { spotifyPlaylistUrl(text.trim()) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     fun accepted() {
         text = ""; confirming = false; onQueued()
@@ -60,9 +61,9 @@ internal fun LinkInput(app: SaoreoApp, settings: Settings, modifier: Modifier = 
     fun submit() {
         if (busy) return
         focus.clearFocus()
-        if (link == null && playlist == null) { error = "Enter a supported video or music URL."; return }
+        if (link == null && playlist == null && spotifyUrl == null) { error = "Enter a supported video or music URL."; return }
         error = null
-        if (!settings.autoShare || playlist != null) { confirming = true; return }
+        if (!settings.autoShare || playlist != null || spotifyUrl != null) { confirming = true; return }
         val target = link ?: return
         scope.launch {
             busy = true
@@ -96,7 +97,7 @@ internal fun LinkInput(app: SaoreoApp, settings: Settings, modifier: Modifier = 
             })
         if (error != null) Text(requireNotNull(error), Modifier.padding(start = 12.dp, top = 4.dp),
             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        else if (link != null || playlist != null) Text(if (playlist != null) "YouTube playlist" else requireNotNull(link).source.label,
+        else if (link != null || playlist != null || spotifyUrl != null) Text(if (spotifyUrl != null) "Spotify playlist · YouTube audio matches" else if (playlist != null) "YouTube playlist" else requireNotNull(link).source.label,
             Modifier.padding(start = 12.dp, top = 4.dp), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }

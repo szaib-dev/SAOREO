@@ -230,6 +230,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     var deletePlaylist by remember { mutableStateOf<MusicPlaylist?>(null) }
     var songOptions by remember { mutableStateOf<Download?>(null) }
     var removeSong by remember { mutableStateOf<Download?>(null) }
+    var remoteImport by rememberSaveable { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Download?>(null) }
     var sort by rememberSaveable { mutableStateOf("Date added") }
@@ -390,6 +391,9 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                                 Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("Create a playlist")
                             }
                         }
+                        item { OutlinedButton({ remoteImport = true }, Modifier.fillMaxWidth()) {
+                            Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(8.dp)); Text("Import YouTube / Spotify playlist")
+                        } }
                         if (playlists.isEmpty()) item {
                             EmptyState("Every mood needs a playlist.", "Create one, then add songs from your library.")
                         }
@@ -397,10 +401,10 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer,
                                 modifier = Modifier.fillMaxWidth().clickable { collection = list.id }) {
                                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    RecordArt(Modifier.size(70.dp), list.id.hashCode())
+                                    PlaylistArtwork(list.thumbnail, list.id.hashCode(), 70)
                                     Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Text(list.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                        Text("${membership.count { it.playlist == list.id }} tracks", style = MaterialTheme.typography.bodySmall,
+                                        Text("${membership.count { ref -> ref.playlist == list.id && songs.any { it.id == ref.song } }} tracks", style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     Icon(Icons.Outlined.PlayArrow, null)
@@ -417,7 +421,10 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                         if (playlist != null) item {
                             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                RecordArt(Modifier.size(180.dp), playlist.id.hashCode())
+                                PlaylistArtwork(playlist.thumbnail, playlist.id.hashCode(), 180)
+                                playlist.sourceUrl?.let { url -> TextButton({
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }) { Text("Open original playlist") } }
                                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button({ visible.firstOrNull()?.let { player?.shuffleModeEnabled = false; play(visible, it) } },
                                         enabled = visible.isNotEmpty() && player != null) {
@@ -477,6 +484,10 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
             }
         }
     }
+    if (remoteImport) AlertDialog(onDismissRequest = { remoteImport = false }, title = { Text("Import a playlist") },
+        text = { val settings by app.preferences.flow.collectAsStateWithLifecycle(Settings())
+            LinkInput(app, settings, onQueued = { remoteImport = false }) },
+        confirmButton = { TextButton({ remoteImport = false }) { Text("Close") } })
     if (addingTracks && playlist != null) AlertDialog(onDismissRequest = { addingTracks = false },
         title = { Text("Add songs to ${playlist.name}") }, text = {
             LazyColumn(Modifier.heightIn(max = 380.dp)) {
