@@ -18,8 +18,8 @@ android {
         manifestPlaceholders["saoreoLabel"] = "SAOREO"
         minSdk = 33
         targetSdk = 36
-        versionCode = 9
-        versionName = "2.4.0"
+        versionCode = 16
+        versionName = "2.9.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += packagedAbis }
         javaCompileOptions {
@@ -35,6 +35,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
     packaging { jniLibs.useLegacyPackaging = true }
+    sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 }
 
 tasks.matching { it.name == "preBuild" }.configureEach {
@@ -71,11 +72,16 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-video:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.getstream:stream-webrtc-android:1.3.9")
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:13.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250107")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.room:room-testing:2.8.3")
     androidTestImplementation("androidx.test:core-ktx:1.7.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit-ktx:1.3.0")

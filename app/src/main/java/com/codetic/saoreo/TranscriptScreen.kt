@@ -7,13 +7,19 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,6 +38,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -45,6 +52,8 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
     var language by rememberSaveable { mutableStateOf("auto") }
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var search by rememberSaveable { mutableStateOf("") }
+    var actionSheet by remember { mutableStateOf<String?>(null) }
+    var searching by rememberSaveable { mutableStateOf(false) }
     var tools by remember { mutableStateOf(false) }
     var confirmModel by remember { mutableStateOf(false) }
     var removeModel by remember { mutableStateOf(false) }
@@ -89,9 +98,8 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
             if (uri != null) toast(context, if (success) "Transcript exported" else "Couldn’t write the transcript.")
         }
     }
-    fun prepareExport(transcript: Transcript) {
+    fun prepareExport(transcript: Transcript, showTimes: Boolean = timestamps) {
         if (exportPending != null) return
-        val showTimes = timestamps
         scope.launch {
             val staged = withContext(Dispatchers.IO) {
                 runCatching {
@@ -114,9 +122,9 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
             }
         }
     }
-    fun copy(result: Transcript) {
+    fun copy(result: Transcript, showTimes: Boolean = timestamps) {
         scope.launch {
-            val text = withContext(Dispatchers.Default) { result.text(timestamps) }
+            val text = withContext(Dispatchers.Default) { result.text(showTimes) }
             try {
                 val clip = if (text.length <= 180_000) ClipData.newPlainText(result.title, text)
                 else {
@@ -136,16 +144,16 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
     }
     val result = status.result
     val visible = remember(result, search) { result?.lines.orEmpty().filter { search.isBlank() || it.text.contains(search, ignoreCase = true) } }
-    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp)) {
         item {
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
+            if (result == null) Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainerLow
             )) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Video to text", style = MaterialTheme.typography.titleLarge)
+                            Text("Transcript", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                             Text(if (ai) "Generate from video or a local file." else "Paste a YouTube link to find captions.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -169,7 +177,7 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
                         }, supportingText = {
                             if (url.isNotBlank() && link == null) Text("Enter a complete link to a supported video.")
                         })
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedButton(enabled = !status.busy, onClick = {
                             val pasted = runCatching { clipboard.primaryClip?.getItemAt(0)?.text?.toString() }
                                 .getOrNull()?.take(16_384).orEmpty()
@@ -180,10 +188,10 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
                                 search = ""
                                 if (!ai) transcriptLink(pasted)?.let { engine.discover(it) }
                             }
-                        }) { Text("Paste") }
+                        }) { Icon(Icons.Outlined.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Paste") }
                         if (!ai) Button(enabled = link != null && !status.busy, onClick = {
                             link?.let { engine.discover(it, refresh = status.captionFailure) }; selected = null
-                        }) { Text(if (status.captionFailure) "Retry captions" else "Find captions") }
+                        }) { Icon(Icons.Outlined.Search, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(if (status.captionFailure) "Retry" else "Find captions") }
                         else Button(enabled = !status.busy, onClick = {
                             openMedia.launch(localDocument("*/*").putExtra(android.content.Intent.EXTRA_MIME_TYPES,
                                 arrayOf("audio/*", "video/*")))
@@ -246,29 +254,56 @@ internal fun TranscriptScreen(app: SaoreoApp, modifier: Modifier = Modifier) {
                 Text(result?.title ?: status.title.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            if (status.tracks.isNotEmpty()) ChoiceMenu(status.tracks.firstOrNull { it.key == selected }?.label ?: "Caption languages",
+            if (status.tracks.isNotEmpty()) ChoiceMenu(status.tracks.firstOrNull { it.key == selected }?.label ?: status.message?.takeIf { result != null } ?: "Language",
                 status.tracks, CaptionTrack::label) { track ->
                 if (!status.busy) { selected = track.key; engine.select(track) }
             }
         }
         if (result != null) {
             item {
-                OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search transcript") })
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    FilterChip(timestamps, { timestamps = !timestamps }, { Text("Timestamps") })
-                    TextButton(onClick = { copy(result) }) { Text("Copy All") }
-                    TextButton(enabled = exportPending == null, onClick = { prepareExport(result) }) {
-                        Text("Export TXT")
-                    }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${result.lines.size} lines", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    IconButton({ searching = !searching; if (!searching) search = "" }) { Icon(Icons.Outlined.Search, "Search transcript") }
+                    IconButton({ engine.reset(); url = "" }) { Icon(Icons.Outlined.Add, "New transcript") }
+                }
+                AnimatedVisibility(searching) {
+                    OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true,
+                        placeholder = { Text("Search transcript") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, shape = RoundedCornerShape(18.dp))
+                }
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(timestamps, { timestamps = !timestamps }, { Text("Time") }, leadingIcon = { Icon(Icons.Outlined.DateRange, null, Modifier.size(16.dp)) }, shape = RoundedCornerShape(18.dp))
+                    FilledTonalButton({ actionSheet = "Copy transcript" }) { Icon(Icons.Outlined.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Copy") }
+                    FilledTonalButton({ actionSheet = "Download transcript" }, enabled = exportPending == null) { Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Save") }
                 }
                 if (visible.isEmpty()) Text("No matching text.")
             }
             items(visible) { line ->
-                SelectionContainer {
-                    Text(if (timestamps && line.ms != null) "[${transcriptClock(line.ms)}] ${line.text}" else line.text,
-                        Modifier.fillMaxWidth().padding(bottom = 4.dp), style = MaterialTheme.typography.bodyLarge)
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (timestamps && line.ms != null) Text(transcriptClock(line.ms),
+                        Modifier.clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 7.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Text(line.text, style = MaterialTheme.typography.bodyMedium, lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.25f)
+                    }
                 }
+            }
+        }
+    }
+    actionSheet?.let { action ->
+        ModalBottomSheet(onDismissRequest = { actionSheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp)) {
+                Text(action, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
+                listOf(false, true).forEach { withTimes ->
+                    ListItem(headlineContent = { Text(if (withTimes) "With timestamps" else "Clean text, without timestamps") },
+                        supportingContent = { Text(if (withTimes) "Keep the time beside each line" else "Just the words, ready to use") },
+                        leadingContent = { Icon(if (action.startsWith("Copy")) Icons.Outlined.ContentPaste else Icons.Outlined.Download, null) },
+                        modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable {
+                            result?.let { if (action.startsWith("Copy")) copy(it, withTimes) else prepareExport(it, withTimes) }
+                            actionSheet = null
+                        })
+                }
+                Spacer(Modifier.height(16.dp))
             }
         }
     }

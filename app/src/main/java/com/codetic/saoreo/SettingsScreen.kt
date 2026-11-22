@@ -13,6 +13,10 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -77,138 +81,98 @@ fun SettingsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modi
         }
     }
 
-    Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-        Section("Share behavior")
-        SettingChoice("Shared links", settings.autoShare, listOf(false, true),
-            { if (it) "Download instantly" else "Ask before downloading" }) { set(SettingKeys.autoShare, it) }
-        Section("Download quality")
-        SettingChoice("Default media type", settings.defaultAudio, listOf(false, true),
-            { if (it) "Audio" else "Video" }) { set(SettingKeys.defaultAudio, it) }
-        SettingChoice("Default video quality", settings.downloadQuality(false),
-            Quality.entries.filter { it !in listOf(Quality.ASK, Quality.AUDIO) }, { it.label }) {
-            set(SettingKeys.quality, it.name)
-        }
-        SettingChoice("Default audio quality", settings.audioBitrate, listOf(128, 192, 256, 320), { "$it kbps" }) {
-            set(SettingKeys.audioBitrate, it)
-        }
-        Section("Storage and folders")
-        SettingSwitch("Folder organization", settings.folderOrganization, "Browse nested folders in Downloads.") {
-            set(SettingKeys.folderOrganization, it)
-        }
-        if (settings.folderOrganization) {
-            val folders by app.collections.folders.collectAsStateWithLifecycle(emptyList())
-            var pickFolder by remember { mutableStateOf(false) }
-            ListItem(headlineContent = { Text("Default download destination") },
-                supportingContent = { Text(folderLabel(folders, settings.defaultFolder)) },
-                modifier = Modifier.clickable { pickFolder = true })
-            if (pickFolder) DestinationDialog(app, settings.defaultFolder, { pickFolder = false }) {
-                set(SettingKeys.defaultFolder, it)
-            }
-            SettingSwitch("Remember last destination", settings.rememberFolder,
-                "Ask uses the last folder. Instant uses the default above.") { set(SettingKeys.rememberFolder, it) }
-        }
-        Section("Music and playback")
-        val playlists by app.collections.playlists.collectAsStateWithLifecycle(emptyList())
-        SettingChoice("Default music playlist", playlists.firstOrNull { it.id == settings.defaultPlaylist },
-            listOf<MusicPlaylist?>(null) + playlists, { it?.name ?: "None" }) { set(SettingKeys.defaultPlaylist, it?.id) }
-        Section("Network and advanced")
-        SettingChoice("Simultaneous downloads", settings.concurrency, listOf(1, 2, 3), { it.toString() }) {
-            set(SettingKeys.concurrency, it)
-        }
-        SettingChoice("Connection", settings.wifi, listOf(false, true),
-            { if (it) "Unmetered only" else "Wi-Fi or mobile data" }) { set(SettingKeys.wifi, it) }
-        SettingSwitch("Retry temporary failures", settings.retry) { set(SettingKeys.retry, it) }
-        SettingSwitch("Resume interrupted downloads", settings.resume) { set(SettingKeys.resume, it) }
-        ListItem(headlineContent = { Text("Advanced") }, trailingContent = {
-            Icon(if (advanced) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
-        }, modifier = Modifier.clickable { advanced = !advanced })
-        if (advanced) {
-            SettingChoice("Socket timeout", settings.timeout, listOf(10, 15, 25, 40, 60), { "$it seconds" }) {
-                set(SettingKeys.timeout, it)
-            }
-            SettingChoice("Retry limit", settings.retries, (0..5).toList(), { it.toString() }) {
-                set(SettingKeys.retries, it)
+    Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        PageHeading("Make it yours.", "Your library. Your preferences.")
+        Surface(shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+            Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Icon(Icons.Outlined.Person, null, Modifier.size(36.dp))
+                Column {
+                    Text("Your offline space", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("Saved on this device. Ready when you are.", style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
-
-        var showDevice by rememberSaveable { mutableStateOf(false) }
-        ListItem(headlineContent = { Text("Device and permissions") }, trailingContent = {
-            Icon(if (showDevice) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
-        }, modifier = Modifier.clickable { showDevice = !showDevice })
-        if (showDevice) {
-            Section("WhatsApp Status folders")
+        PreferenceGroup("Look & feel") {
+            SettingChoice("Appearance", settings.theme, listOf("System", "Light", "Dark"), { it }) { set(SettingKeys.theme, it) }
+            SettingSwitch("Haptic feedback", settings.haptic, "A little feedback when a download starts.") { set(SettingKeys.haptic, it) }
+        }
+        PreferenceGroup("Downloads") {
+            SettingChoice("Link confirmation", settings.autoShare, listOf(false, true),
+                { if (it) "Instant download (skip confirmation)" else "Preview and choose quality" }) { set(SettingKeys.autoShare, it) }
+            SettingChoice("Save as", settings.defaultAudio, listOf(false, true),
+                { if (it) "Music · MP3" else "Video · MP4" }) { set(SettingKeys.defaultAudio, it) }
+            SettingChoice("Video quality", settings.downloadQuality(false),
+                Quality.entries.filter { it !in listOf(Quality.ASK, Quality.AUDIO) }, { it.label }) { set(SettingKeys.quality, it.name) }
+            SettingChoice("Audio bitrate", settings.audioBitrate, listOf(128, 192, 256, 320), { "$it kbps" }) { set(SettingKeys.audioBitrate, it) }
+            SettingChoice("Connection", settings.wifi, listOf(false, true),
+                { if (it) "Unmetered only" else "Wi-Fi or mobile data" }) { set(SettingKeys.wifi, it) }
+            SettingChoice("Simultaneous downloads", settings.concurrency, listOf(1, 2, 3), { it.toString() }) { set(SettingKeys.concurrency, it) }
+            SettingSwitch("Retry temporary failures", settings.retry) { set(SettingKeys.retry, it) }
+            SettingSwitch("Resume interrupted downloads", settings.resume) { set(SettingKeys.resume, it) }
+        }
+        PreferenceGroup("Library & storage") {
+            val playlists by app.collections.playlists.collectAsStateWithLifecycle(emptyList())
+            SettingChoice("Save new audio to playlist", playlists.firstOrNull { it.id == settings.defaultPlaylist },
+                listOf<MusicPlaylist?>(null) + playlists, { it?.name ?: "Library only" }) { set(SettingKeys.defaultPlaylist, it?.id) }
+            SettingSwitch("Organize downloads in folders", settings.folderOrganization) { set(SettingKeys.folderOrganization, it) }
+            if (settings.folderOrganization) {
+                val folders by app.collections.folders.collectAsStateWithLifecycle(emptyList())
+                var pickFolder by remember { mutableStateOf(false) }
+                ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Default download folder") }, supportingContent = { Text(folderLabel(folders, settings.defaultFolder)) },
+                    modifier = Modifier.clickable { pickFolder = true })
+                if (pickFolder) DestinationDialog(app, settings.defaultFolder, { pickFolder = false }) { set(SettingKeys.defaultFolder, it) }
+                SettingSwitch("Remember last destination", settings.rememberFolder) { set(SettingKeys.rememberFolder, it) }
+            }
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Thumbnail cache") }, supportingContent = { Text(sizeLabel(cacheBytes)) },
+                trailingContent = { TextButton({ act {
+                    app.extractor.clearCache()
+                    coil.Coil.imageLoader(app).memoryCache?.clear()
+                    withContext(Dispatchers.IO) { coil.Coil.imageLoader(app).diskCache?.clear() }
+                    cacheRevision++
+                } }) { Text("Clear") } })
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Clear download history") }, supportingContent = { Text("Keeps your saved files and music library.") },
+                modifier = Modifier.clickable { confirmation = "history" })
+        }
+        PreferenceGroup("Device & permissions") {
             listOf(Source.WHATSAPP to settings.whatsapp, Source.BUSINESS to settings.business).forEach { (source, folder) ->
-                val granted = folder != null && app.contentResolver.persistedUriPermissions.any {
-                    it.isReadPermission && it.uri == Uri.parse(folder)
-                }
-                ListItem(headlineContent = { Text(source.label) }, supportingContent = {
-                    Text(if (granted) "Read access granted" else "Choose a status folder")
-                }, trailingContent = {
-                    TextButton(onClick = { pendingFolder = source; picker.launch(null) }) {
-                        Text(if (granted) "Change" else "Connect")
-                    }
-                })
-                if (folder != null) TextButton(onClick = { act { app.statuses.connect(source, null) } }) {
-                    Text("Disconnect ${source.label}")
-                }
+                val granted = folder != null && app.contentResolver.persistedUriPermissions.any { it.isReadPermission && it.uri == Uri.parse(folder) }
+                ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("${source.label} status folder") }, supportingContent = { Text(if (granted) "Connected" else "Choose a folder") },
+                    trailingContent = { TextButton({ pendingFolder = source; picker.launch(null) }) { Text(if (granted) "Change" else "Connect") } })
             }
-            SettingSwitch("Refresh statuses on return", settings.statusRefresh) { set(SettingKeys.statusRefresh, it) }
-
-            Section("Appearance")
-            SettingChoice("Theme", settings.theme, listOf("System", "Light", "Dark"), { it }) { set(SettingKeys.theme, it) }
-            SettingSwitch("Haptic feedback", settings.haptic) { set(SettingKeys.haptic, it) }
-
-            Section("Notifications")
-            SettingSwitch("Show completion notifications", settings.completion) { set(SettingKeys.completion, it) }
-            SettingSwitch("Show failure notifications", settings.failure) { set(SettingKeys.failure, it) }
-            ListItem(headlineContent = { Text("Download progress") },
-                supportingContent = { Text("Android uses a foreground notification for active transfers.") },
-                trailingContent = {
-                    if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-                        TextButton(onClick = { notifications.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Enable") }
-                })
-
-            Section("Floating Button")
+            SettingSwitch("Refresh statuses automatically", settings.statusRefresh) { set(SettingKeys.statusRefresh, it) }
+            SettingSwitch("Completion notifications", settings.completion) { set(SettingKeys.completion, it) }
+            SettingSwitch("Failure notifications", settings.failure) { set(SettingKeys.failure, it) }
+            val granted = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Notification permission") }, supportingContent = { Text(if (granted) "Allowed" else "Keep up with downloads in the background") },
+                trailingContent = { if (!granted) TextButton({ notifications.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Enable") } })
             val overlayGranted = AndroidSettings.canDrawOverlays(context)
-            SettingSwitch("Floating shortcut", settings.overlay && overlayGranted,
-                if (overlayGranted) "Overlay permission granted" else "Android overlay permission required") { enabled ->
-                if (!enabled) hideOverlay()
-                else if (overlayGranted) showOverlay()
-                else overlayPermission.launch(Intent(AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:${context.packageName}")))
+            SettingSwitch("Floating download shortcut", settings.overlay && overlayGranted) { enabled ->
+                if (!enabled) hideOverlay() else if (overlayGranted) showOverlay()
+                else overlayPermission.launch(Intent(AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
             }
             if (settings.overlay && overlayGranted) {
-                SettingChoice("Button size", settings.overlaySize, listOf(42, 48, 56, 64), { "$it dp" }) {
-                    set(SettingKeys.overlaySize, it)
-                }
-                SettingChoice("Opacity", settings.overlayOpacity, listOf(45, 60, 75, 90, 100), { "$it%" }) {
-                    set(SettingKeys.overlayOpacity, it)
-                }
-                TextButton(onClick = { hideOverlay() }) { Text("Hide button") }
+                SettingChoice("Shortcut size", settings.overlaySize, listOf(42, 48, 56, 64), { "$it dp" }) { set(SettingKeys.overlaySize, it) }
+                SettingChoice("Shortcut opacity", settings.overlayOpacity, listOf(45, 60, 75, 90, 100), { "$it%" }) { set(SettingKeys.overlayOpacity, it) }
             }
-
-            Section("Privacy and Storage")
-            ListItem(headlineContent = { Text("Thumbnail cache") }, supportingContent = { Text(sizeLabel(cacheBytes)) },
-                trailingContent = {
-                    TextButton(onClick = { act {
-                        app.extractor.clearCache()
-                        coil.Coil.imageLoader(app).memoryCache?.clear()
-                        withContext(Dispatchers.IO) { coil.Coil.imageLoader(app).diskCache?.clear() }
-                        cacheRevision++
-                    } }) { Text("Clear") }
-                })
-            ListItem(headlineContent = { Text("Clear download history") },
-                supportingContent = { Text("Completed and failed records are removed. Media stays in the gallery.") },
-                modifier = Modifier.clickable { confirmation = "history" })
-            ListItem(headlineContent = { Text("Diagnostics") }, modifier = Modifier.clickable { confirmation = "diagnostics" })
-            ListItem(headlineContent = { Text("Open-source components") }, modifier = Modifier.clickable { confirmation = "licenses" })
-
-            Section("About")
-            val info = remember { app.packageManager.getPackageInfo(app.packageName, 0) }
-            ListItem(headlineContent = { Text("SAOREO ${info.versionName}") },
-                supportingContent = { Text("Build ${info.longVersionCode} · API ${Build.VERSION.SDK_INT}\nyt-dlp ${Extractor.ENGINE_VERSION} · Android wrapper 0.18.1") })
         }
-        Spacer(Modifier.height(12.dp))
+        PreferenceGroup("Advanced & about") {
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Advanced network settings") }, trailingContent = {
+                Icon(if (advanced) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
+            }, modifier = Modifier.clickable { advanced = !advanced })
+            if (advanced) {
+                SettingChoice("Socket timeout", settings.timeout, listOf(10, 15, 25, 40, 60), { "$it seconds" }) { set(SettingKeys.timeout, it) }
+                SettingChoice("Retry limit", settings.retries, (0..5).toList(), { it.toString() }) { set(SettingKeys.retries, it) }
+            }
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("YouTube diagnostics") }, modifier = Modifier.clickable { confirmation = "diagnostics" })
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("Open-source components") }, modifier = Modifier.clickable { confirmation = "licenses" })
+            val info = remember { app.packageManager.getPackageInfo(app.packageName, 0) }
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("SAOREO ${info.versionName}") }, supportingContent = {
+                Text("Build ${info.longVersionCode} · Android ${Build.VERSION.SDK_INT}\nyt-dlp ${Extractor.ENGINE_VERSION}")
+            })
+        }
+        Spacer(Modifier.height(24.dp))
     }
 
     if (confirmation == "diagnostics") {
@@ -271,30 +235,24 @@ private fun YoutubeDiagnosticsDialog(app: SaoreoApp, onClose: () -> Unit) {
 }
 
 @Composable
-private fun Section(name: String) {
-    if (name != "Downloads") HorizontalDivider(Modifier.padding(top = 9.dp))
-    Text(name, modifier = Modifier.padding(top = 15.dp, bottom = 4.dp),
-        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+private fun PreferenceGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Eyebrow(title, Modifier.padding(start = 6.dp, top = 10.dp))
+        Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), content = content)
+        }
+    }
 }
 
 @Composable
 private fun SettingSwitch(name: String, active: Boolean, explanation: String? = null, change: (Boolean) -> Unit) {
-    ListItem(headlineContent = { Text(name) },
+    ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name) },
         supportingContent = explanation?.let { { Text(it) } },
         trailingContent = { Switch(checked = active, onCheckedChange = change) })
 }
 
 @Composable
 private fun <T> SettingChoice(name: String, selection: T, choices: List<T>, label: (T) -> String, select: (T) -> Unit) {
-    var menu by remember { mutableStateOf(false) }
-    Box {
-        ListItem(headlineContent = { Text(name) }, supportingContent = { Text(label(selection)) },
-            trailingContent = { Icon(Icons.Outlined.ArrowDropDown, null) },
-            modifier = Modifier.clickable { menu = true })
-        DropdownMenu(menu, onDismissRequest = { menu = false }) {
-            choices.forEach { option ->
-                DropdownMenuItem(text = { Text(label(option)) }, onClick = { menu = false; select(option) })
-            }
-        }
-    }
+    ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name) },
+        trailingContent = { Box(Modifier.widthIn(max = 170.dp)) { ChoiceMenu(label(selection), choices, label, select) } })
 }

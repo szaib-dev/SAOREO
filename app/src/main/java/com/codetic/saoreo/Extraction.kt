@@ -33,7 +33,11 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 class Extractor(private val context: Context) {
-    private val proxy by lazy { MediaProxy() }
+    private val proxy by lazy { MediaProxy(onFailure = { host, reason ->
+        (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(JSONObject()
+            .put("stage", "local_proxy").put("host", host).put("status", 502).put("reason", reason).toString())
+    }) }
+    private val transport by lazy { YoutubeProcess(context) }
     private val profiledProcess by lazy { YoutubeProfileProcess(context) }
     @Volatile private var initialization: List<Pair<String, Long>> = emptyList()
     private val engineFactory = lazy {
@@ -47,6 +51,10 @@ class Extractor(private val context: Context) {
         YoutubeDL
     }
     private val engine by engineFactory
+
+    internal fun initializeLocalEncoder() {
+        engineFactory.value
+    }
 
     private inline fun measureInit(action: () -> Unit): Long {
         val start = SystemClock.elapsedRealtimeNanos()
@@ -217,11 +225,21 @@ class Extractor(private val context: Context) {
                         val total = fields.optLong("total").takeIf { it > 0 } ?: bytes.takeIf { done && it > 0 }
                         streams[format] = bytes to total
                         val sum = streams.values.sumOf { it.first }
-                        val length = streams.values.takeIf { selector == null && it.size == expected && it.all { entry -> entry.second != null } }
-                            ?.sumOf { it.second ?: 0 }
+                        val manifest = resultInfo?.takeIf { it.isFile }?.let { runCatching { JSONObject(it.readText().lineSequence().last { line -> line.isNotBlank() }) }.getOrNull() }
+                        val selected = manifest?.optJSONArray("formats")
+                        val formatCount = selected?.length()?.takeIf { it > 0 } ?: expected
+                        val knownSize = if (selected != null && selected.length() > 0) {
+                            (0 until selected.length()).map { index ->
+                                selected.getJSONObject(index).let { row -> row.optLong("filesize").takeIf { it > 0 } ?: row.optLong("filesize_approx").takeIf { it > 0 } }
+                            }.takeIf { sizes -> sizes.all { it != null } }?.sumOf { it ?: 0 }
+                        } else manifest?.optLong("filesize")?.takeIf { it > 0 } ?: manifest?.optLong("filesize_approx")?.takeIf { it > 0 }
+                        val length = knownSize ?: streams.values.takeIf { it.size == formatCount && it.all { entry -> entry.second != null } }?.sumOf { it.second ?: 0 }
                         progress(TransferProgress(bytes = sum, total = length,
                             bytesPerSecond = fields.optDouble("speed").takeIf { it.isFinite() && it > 0 }?.toLong()))
                     }
+                } else if (line == "SAOREO_REFRESH") {
+                    streams.clear()
+                    progress(TransferProgress("Refreshing media connection"))
                 } else if (line.startsWith("[Merger]")) {
                     progress(TransferProgress("Merging video and audio"))
                 } else if (line.startsWith("[ExtractAudio]") || line.startsWith("[VideoConvertor]")) {
@@ -231,9 +249,10 @@ class Extractor(private val context: Context) {
                 }
             }) {
                 addOption("-f", selector ?: id)
+                if (link.source == Source.YOUTUBE) addOption("--check-formats")
                 if (resultInfo != null) {
                     addOption("--no-simulate")
-                    addCommands(listOf("--print-to-file", """before_dl:{"title":%(title)j}""", resultInfo.absolutePath))
+                    addCommands(listOf("--print-to-file", """before_dl:{"title":%(title)j,"formats":%(requested_formats)j,"filesize":%(filesize)j,"filesize_approx":%(filesize_approx)j}""", resultInfo.absolutePath))
                     addOption("-S", "res,vcodec:h264,acodec:aac")
                 }
                 addOption("-o", File(directory, "media.%(ext)s").absolutePath)
@@ -249,6 +268,8 @@ class Extractor(private val context: Context) {
                 addOption("--retry-sleep", "fragment:exp=1:10")
                 addOption("--downloader", "m3u8:native")
                 addOption("--hls-prefer-native")
+                addOption("--concurrent-fragments", 4)
+                addOption("--http-chunk-size", "10M")
                 if (choice.audioOnly && choice.extension == "mp3") {
                     addOption("-x")
                     addOption("--audio-format", "mp3")
@@ -360,6 +381,12 @@ class Extractor(private val context: Context) {
                         if (continuation.isActive) {
                             val proxyStart = SystemClock.elapsedRealtimeNanos()
                             val localProxy = when {
+                                link.source in setOf(Source.YOUTUBE, Source.INSTAGRAM) -> MediaProxy(trace,
+                                    consistentFamily = true,
+                                    onFailure = { host, reason -> (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(JSONObject()
+                                        .put("stage", "local_proxy").put("host", host).put("status", 502).put("reason", reason).toString()) },
+                                    onRoute = { host, family -> (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(JSONObject()
+                                        .put("stage", "proxy_route").put("host", host).put("family", family).toString()) })
                                 replayInfo != null -> MediaProxy(allowedOrigin = { streamCdnHost(link.source, it) })
                                 trace != null -> MediaProxy(trace)
                                 else -> null
@@ -367,43 +394,54 @@ class Extractor(private val context: Context) {
                             val activeProxy = localProxy ?: proxy
                             trace?.add("proxy.startup", SystemClock.elapsedRealtimeNanos() - proxyStart)
                             try {
-                                val request = (if (replayInfo == null) YoutubeDLRequest(link.url)
-                                    else YoutubeDLRequest(emptyList())).apply {
-                                    replayInfo?.let { addOption("--load-info-json", it.absolutePath) }
-                                    addOption("--ignore-config")
-                                    addOption(if (playlist) "--yes-playlist" else "--no-playlist")
-                                    addOption("--playlist-end", if (playlist) 100 else 1)
-                                    addOption(if (trace == null) "--no-warnings" else "--verbose")
-                                    addOption("--no-colors")
-                                    addOption("--no-cache-dir")
-                                    addOption("--proxy", activeProxy.url)
-                                    addOption("--socket-timeout", timeout)
-                                    addOption("--retries", retries)
-                                    trace?.client?.extractorArgument?.let { addOption("--extractor-args", it) }
-                                    options()
-                                }
-                                val entered = SystemClock.elapsedRealtimeNanos()
-                                val payload = if (trace == null || trace.mode == YoutubeTraceMode.WRAPPER) {
+                                val clients = if (link.source == Source.YOUTUBE && replayInfo == null &&
+                                    (trace == null || trace.client == YoutubeTrial.DEFAULT)) youtubeClients else listOf(null)
+                                var payload: String? = null
+                                for ((attempt, client) in clients.withIndex()) {
+                                    if (!continuation.isActive || Thread.currentThread().isInterrupted) break
+                                    val request = (if (replayInfo == null) YoutubeDLRequest(link.url)
+                                        else YoutubeDLRequest(emptyList())).apply {
+                                        replayInfo?.let { addOption("--load-info-json", it.absolutePath) }
+                                        addOption("--ignore-config")
+                                        addOption(if (playlist) "--yes-playlist" else "--no-playlist")
+                                        addOption("--playlist-end", if (playlist) 100 else 1)
+                                        addOption(if (trace == null) "--no-warnings" else "--verbose")
+                                        addOption("--no-colors")
+                                        addOption("--cache-dir", File(context.cacheDir, "extractor").absolutePath)
+                                        addOption("--proxy", activeProxy.url)
+                                        addOption("--socket-timeout", timeout)
+                                        addOption("--retries", retries)
+                                        // 403s must re-extract, rather than repeatedly retry an expired CDN URL.
+                                        if (link.source == Source.YOUTUBE) addOption("--retry-sleep", "http:exp=1:4")
+                                        (trace?.client?.extractorArgument ?: client)?.let { addOption("--extractor-args", it) }
+                                        options()
+                                    }
+                                    val entered = SystemClock.elapsedRealtimeNanos()
                                     try {
-                                        current.execute(request, id, callback).also { response ->
-                                            if (trace != null) {
-                                                trace.add("wrapper.return", SystemClock.elapsedRealtimeNanos() - entered)
-                                                response.err.lineSequence().filter(String::isNotBlank).forEach {
+                                        payload = if (trace == null || trace.mode == YoutubeTraceMode.WRAPPER) {
+                                            if (link.source in setOf(Source.YOUTUBE, Source.INSTAGRAM)) transport.execute(request.buildCommand(), callback) { json ->
+                                                (context.applicationContext as SaoreoApp).youtubeDiagnostics.recordHttp(json)
+                                            } else current.execute(request, id, callback).also { response ->
+                                                trace?.add("wrapper.return", SystemClock.elapsedRealtimeNanos() - entered)
+                                                if (trace != null) response.err.lineSequence().filter(String::isNotBlank).forEach {
                                                     trace.add(YoutubeVerbose.summary(it))
                                                 }
-                                            }
-                                        }.out
+                                            }.out
+                                        } else profiledProcess.execute(request.buildCommand(), trace)
+                                        break
                                     } catch (failure: Exception) {
-                                        if (trace != null) {
-                                            trace.add("wrapper.error", SystemClock.elapsedRealtimeNanos() - entered)
-                                            failure.message.orEmpty().lineSequence().filter(String::isNotBlank).forEach {
-                                                trace.add(YoutubeVerbose.summary(it))
-                                            }
+                                        trace?.add("wrapper.error", SystemClock.elapsedRealtimeNanos() - entered)
+                                        if (trace != null) failure.message.orEmpty().lineSequence().filter(String::isNotBlank).forEach {
+                                            trace.add(YoutubeVerbose.summary(it))
                                         }
-                                        throw failure
+                                        if (attempt == clients.lastIndex || !shouldRetryYoutubeClient(failure)) throw failure
+                                        trace?.add("youtube.client_fallback_${attempt + 1}")
+                                        callback?.invoke(0f, 0L, "SAOREO_REFRESH")
+                                        Log.i(TAG, "youtube_client_fallback attempt=${attempt + 1}")
                                     }
-                                } else profiledProcess.execute(request.buildCommand(), trace)
-                                if (continuation.isActive) continuation.resume(payload)
+                                }
+                                if (payload == null && continuation.isActive) throw IOException("Extraction interrupted")
+                                if (continuation.isActive) continuation.resume(requireNotNull(payload))
                             } finally { localProxy?.close() }
                         }
                     } catch (failure: Exception) {
@@ -431,7 +469,7 @@ class Extractor(private val context: Context) {
     }
 
     private fun jsonPreview(text: String, trace: YoutubeTrace?, source: Source): Preview {
-        val json = JSONObject(text.trim())
+        val json = mediaMetadataObject(JSONObject(text.trim()))
         val duration = json.optDouble("duration").takeIf { it.isFinite() && it > 0 }
         val formats = json.optJSONArray("formats")
         trace?.add("app.upstream_formats_${formats?.length() ?: 0}")
@@ -522,8 +560,8 @@ class Extractor(private val context: Context) {
     }
 
     companion object {
-        internal const val ENGINE_VERSION = "2026.10.26"
-        private const val ENGINE_SHA256 = "e51e69e89489f199530f13d32a4342da3ddb2cf34842f364603a066db05afbf3"
+        internal const val ENGINE_VERSION = "2026.11.20.232656"
+        private const val ENGINE_SHA256 = "03f4e98b9d65d41c509235666439fb3d2f51fb0d10892a06c764ad9def770f0d"
         private const val TAG = "SAOREO"
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36"
     }
@@ -556,6 +594,7 @@ private fun openGraph(html: String): Map<String, List<String>> {
 }
 
 internal fun directAssetHost(source: Source, host: String): Boolean = when (source) {
+    Source.INSTAGRAM -> streamCdnHost(source, host)
     Source.PINTEREST -> host == "i.pinimg.com"
     Source.SNAPCHAT -> host == "cf-st.sc-cdn.net"
     else -> false

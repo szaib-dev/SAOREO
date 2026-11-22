@@ -1,0 +1,275 @@
+package com.codetic.saoreo
+
+import android.app.Application
+import android.content.ContentResolver
+import android.net.Uri
+import android.os.SystemClock
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.common.util.UnstableApi
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+internal data class TogetherMember(val id: String, val name: String, val ordinal: Int, val online: Boolean,
+    val ready: Boolean, val buffering: Boolean, val call: Boolean, val mic: Boolean, val camera: Boolean)
+internal data class TogetherMedia(val id: String, val kind: String, val source: String, val title: String, val duration: Long, val live: Boolean) {
+    fun json() = JSONObject().put("kind", kind).put("source", source).put("title", title).put("duration", duration).put("live", live)
+}
+internal data class TogetherChat(val id: String, val sender: String, val name: String, val text: String, val time: Long)
+internal data class TogetherReaction(val emoji: String, val at: Long)
+internal data class RoomRequest(val id: String, val kind: String, val sender: String, val recipient: String, val expires: Long)
+internal data class RoomAnswer(val request: RoomRequest, val accepted: Boolean)
+private fun JSONObject.roomRequest() = RoomRequest(getString("id"), getString("kind"),
+    getString("sender"), getString("recipient"), getLong("expires"))
+
+internal data class TogetherState(val connected: Boolean = false, val connecting: Boolean = false, val room: String = "",
+    val member: String = "", val invite: String = "", val error: String? = null, val revision: Long = -1,
+    val members: List<TogetherMember> = emptyList(), val media: TogetherMedia? = null, val queue: List<TogetherMedia> = emptyList(),
+    val timeline: SharedTimeline = SharedTimeline(0, 0, false), val wanted: Boolean = false, val wait: Boolean = true,
+    val chat: List<TogetherChat> = emptyList(), val reaction: TogetherReaction? = null,
+    val request: RoomRequest? = null, val answer: RoomAnswer? = null)
+
+internal val TogetherState.canStartPlayback: Boolean
+    get() = connected && media != null && members.size == 2 &&
+        members.all { it.online && it.ready }
+
+internal class TogetherSession(application: Application) : AndroidViewModel(application) {
+    private val mutable = MutableStateFlow(TogetherState())
+    val state = mutable.asStateFlow()
+    val preferences = application.getSharedPreferences("together", 0)
+    private val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS).build()
+    private var socket: WebSocket? = null
+    private var token = ""
+    private var endpoint = ""
+    private var seq = 0L
+    private var generation = 0
+    private var reconnect: Job? = null
+    private var heartbeat: Job? = null
+    private var leaving = false
+    private var clockOffset = 0L
+    private var clockMeasured = false
+    private var bestRtt = Long.MAX_VALUE
+    var iceServers: JSONArray = JSONArray(); private set
+    var onSignal: ((JSONObject) -> Unit)? = null
+    var onConnectionLost: (() -> Unit)? = null
+
+    fun serverNow(): Long = SystemClock.elapsedRealtime() + clockOffset
+    fun clearError() { mutable.value = mutable.value.copy(error = null) }
+    fun clearAnswer() { mutable.value = mutable.value.copy(answer = null) }
+    fun error(message: String) { mutable.value = mutable.value.copy(error = message) }
+
+    fun inviteLink(): String = "$endpoint/together/join?invite=${state.value.invite}"
+
+    fun uploadUrl(id: String): String = "$endpoint/together/media/${state.value.room}/$id"
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    fun uploadDataSource(): DefaultHttpDataSource.Factory = DefaultHttpDataSource.Factory()
+        .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
+
+    suspend fun shareVideo(resolver: ContentResolver, uri: Uri, onProgress: (Long, Long) -> Unit): String {
+        val room = state.value.room
+        check(state.value.connected && room.isNotEmpty()) { "Reconnect to your room before sharing." }
+        val client = http.newBuilder().followRedirects(false).callTimeout(10, TimeUnit.MINUTES).build()
+        val maximum = 100L * 1024 * 1024
+        val length = withContext(Dispatchers.IO) {
+            resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        }
+        check(length <= maximum) { "Choose an MP4 under 100 MiB." }
+        val body = object : RequestBody() {
+            override fun contentType() = "video/mp4".toMediaType()
+            override fun contentLength() = length
+            override fun writeTo(sink: okio.BufferedSink) {
+                val input = resolver.openInputStream(uri) ?: throw java.io.IOException("Unable to open this video.")
+                input.use {
+                    val buffer = ByteArray(128 * 1024)
+                    var sent = 0L
+                    while (true) {
+                        val bytes = it.read(buffer)
+                        if (bytes < 0) break
+                        sent += bytes
+                        if (sent > maximum) throw java.io.IOException("Choose an MP4 under 100 MiB.")
+                        sink.write(buffer, 0, bytes)
+                        onProgress(sent, length)
+                    }
+                }
+            }
+        }
+        val request = Request.Builder().url("$endpoint/together/media/$room")
+            .header("Authorization", "Bearer $token").post(body).build()
+        return suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: java.io.IOException) {
+                    continuation.resumeWith(Result.failure(e))
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resumeWith(runCatching {
+                        response.use {
+                            val payload = JSONObject(it.body?.string().orEmpty())
+                            check(it.isSuccessful) { payload.optString("error", "Could not share this video.") }
+                            payload.getString("id")
+                        }
+                    })
+                }
+            })
+        }
+    }
+
+    fun enter(url: String, name: String, key: String? = null, invite: String? = null) {
+        if (mutable.value.connecting || mutable.value.room.isNotEmpty()) return
+        val base = TogetherSources.endpoint(url) ?: return error("Enter a valid HTTPS server address")
+        val invitation = invite?.let { TogetherSources.invite(it) ?: return error("Paste the complete invitation code") }
+        if (name.isBlank()) return error("Enter your name")
+        endpoint = base
+        leaving = false
+        mutable.value = TogetherState(connecting = true)
+        viewModelScope.launch {
+            try {
+                val ticket = withContext(Dispatchers.IO) {
+                    val body = JSONObject().put("name", name.take(32))
+                    if (invitation != null) body.put("invite", invitation) else body.put("key", key.orEmpty())
+                    val route = if (invitation == null) "rooms" else "join"
+                    val req = Request.Builder().url("$base/together/api/$route")
+                        .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+                    http.newCall(req).execute().use { response ->
+                        val json = JSONObject(response.body?.string().orEmpty())
+                        check(response.isSuccessful) { json.optString("error", "Unable to join room") }
+                        json
+                    }
+                }
+                token = ticket.getString("token")
+                iceServers = ticket.optJSONArray("iceServers") ?: JSONArray()
+                preferences.edit().putString("server", base).putString("name", name.take(32)).apply()
+                mutable.value = TogetherState(connecting = true, room = ticket.getString("room"),
+                    member = ticket.getString("member"), invite = ticket.getString("invite"))
+                connect()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                mutable.value = TogetherState(error = e.message ?: "Unable to reach the room server")
+            }
+        }
+    }
+
+    private fun connect() {
+        val run = ++generation
+        reconnect?.cancel()
+        mutable.value = mutable.value.copy(connecting = true, connected = false)
+        val req = Request.Builder().url(endpoint.replaceFirst("https://", "wss://") + "/together/ws").build()
+        socket = http.newWebSocket(req, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                viewModelScope.launch {
+                    if (run != generation || leaving) { webSocket.close(1000, null); return@launch }
+                    seq = 0
+                    webSocket.send(JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 2).toString())
+                    heartbeat?.cancel()
+                    heartbeat = viewModelScope.launch {
+                        while (isActive) {
+                            send("ping", JSONObject().put("sent", SystemClock.elapsedRealtime()), requireConnected = false)
+                            delay(5000)
+                        }
+                    }
+                }
+            }
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                viewModelScope.launch { if (run == generation && !leaving) receive(text) }
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                viewModelScope.launch { if (run == generation) lost() }
+            }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                viewModelScope.launch {
+                    if (run != generation || leaving) return@launch
+                    if (code in setOf(4001, 4003, 4004)) {
+                        heartbeat?.cancel(); onConnectionLost?.invoke()
+                        mutable.value = TogetherState(error = "Room ended or invitation expired. Join a new room.")
+                        token = ""
+                    } else lost()
+                }
+            }
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
+        })
+    }
+
+    private fun lost() {
+        if (leaving || token.isEmpty()) return
+        heartbeat?.cancel()
+        mutable.value = mutable.value.copy(connected = false, connecting = true)
+        onConnectionLost?.invoke()
+        reconnect?.cancel()
+        reconnect = viewModelScope.launch { delay(2500); connect() }
+    }
+
+    private fun media(json: JSONObject) = TogetherMedia(json.getString("id"), json.getString("kind"), json.getString("source"),
+        json.optString("title", "Watch together"), json.optLong("duration"), json.optBoolean("live"))
+    private fun chat(json: JSONObject) = TogetherChat(json.getString("id"), json.getString("sender"), json.optString("name"), json.getString("text"), json.optLong("time"))
+    private fun receive(text: String) {
+        runCatching {
+            val json = JSONObject(text)
+            when (json.getString("type")) {
+                "pong" -> {
+                    val sent = json.getLong("sent"); val received = SystemClock.elapsedRealtime(); val rtt = received - sent
+                    if (rtt in 0..bestRtt) {
+                        bestRtt = rtt; clockOffset = json.getLong("serverTime") - (sent + received) / 2; clockMeasured = true
+                    }
+                }
+                "state" -> {
+                    val old = mutable.value
+                    val rev = json.getLong("revision")
+                    if (rev < old.revision) return
+                    if (!clockMeasured) clockOffset = json.getLong("serverTime") - SystemClock.elapsedRealtime()
+                    val members = json.getJSONArray("members").objects().map { m -> TogetherMember(m.getString("id"), m.getString("name"),
+                        m.getInt("ordinal"), m.getBoolean("online"), m.getBoolean("ready"), m.getBoolean("buffering"),
+                        m.getBoolean("call"), m.getBoolean("mic"), m.getBoolean("camera")) }
+                    mutable.value = old.copy(connected = true, connecting = false, revision = rev, members = members,
+                        request = json.optJSONObject("request")?.roomRequest(),
+                        media = json.optJSONObject("media")?.let(::media), queue = json.getJSONArray("queue").objects().map(::media),
+                        timeline = SharedTimeline(json.getDouble("position").toLong(), json.getLong("serverTime"), json.getBoolean("playing")),
+                        wanted = json.getBoolean("wanted"), wait = json.getBoolean("wait"))
+                }
+                "history" -> mutable.value = mutable.value.copy(chat = json.getJSONArray("messages").objects().map(::chat))
+                "chat" -> {
+                    val item = chat(json)
+                    mutable.value = mutable.value.copy(chat = (mutable.value.chat.filterNot { it.id == item.id } + item).takeLast(80))
+                }
+                "reaction" -> mutable.value = mutable.value.copy(reaction = TogetherReaction(json.getString("emoji"), SystemClock.elapsedRealtime()))
+                "requestResult" -> mutable.value = mutable.value.copy(answer = RoomAnswer(json.roomRequest(), json.optBoolean("accepted")))
+                "signal" -> onSignal?.invoke(json.getJSONObject("payload"))
+                "error" -> error(json.optString("message", "Room action failed"))
+                "invite" -> mutable.value = mutable.value.copy(invite = json.getString("invite"))
+            }
+        }.onFailure { error("Received an invalid room response") }
+    }
+
+    fun send(type: String, payload: JSONObject = JSONObject(), requireConnected: Boolean = true): Boolean {
+        if (requireConnected && !mutable.value.connected) return false
+        payload.put("type", type).put("seq", ++seq)
+        mutable.value.media?.let { payload.put("mediaId", it.id) }
+        return socket?.send(payload.toString()) == true
+    }
+    fun status(ready: Boolean, buffering: Boolean = false) = send("status", JSONObject().put("ready", ready).put("buffering", buffering))
+    fun playback(type: String, position: Long? = null): Boolean {
+        if (type in setOf("play", "seek") && !state.value.canStartPlayback) return false
+        return send(type, JSONObject().apply { position?.let { put("position", it) } })
+    }
+    fun setMedia(item: TogetherMedia, queue: Boolean = false) = send(if (queue) "queueAdd" else "media", JSONObject().put("media", item.json()))
+    fun leave() {
+        send("leave")
+        leaving = true; generation++; reconnect?.cancel(); heartbeat?.cancel()
+        socket?.close(1000, "Left room"); socket = null; token = ""
+        onConnectionLost?.invoke()
+        mutable.value = TogetherState()
+    }
+    override fun onCleared() { leave(); http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll() }
+}
+
+internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }

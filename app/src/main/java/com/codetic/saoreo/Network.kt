@@ -19,13 +19,13 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 object PublicDns : Dns {
-    private fun public(address: InetAddress): Boolean {
+    internal fun isPublicAddress(address: InetAddress): Boolean {
         if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
             address.isSiteLocalAddress || address.isMulticastAddress) return false
         val bytes = address.address.map { it.toInt() and 255 }
         if (address is Inet6Address) {
             // Limit to global unicast and exclude IETF special-purpose and transition ranges.
-            return bytes[0] in 32..63 && !(bytes[0] == 32 && (bytes[1] == 1 || bytes[1] == 2)) &&
+            return bytes[0] in 32..63 && !(bytes[0] == 32 && (bytes[1] == 1 && (bytes[2] < 2 || bytes[2] == 13 && bytes[3] == 184) || bytes[1] == 2)) &&
                 !(bytes[0] == 63 && bytes[1] == 255)
         }
         val (a, b, c) = bytes
@@ -41,7 +41,7 @@ object PublicDns : Dns {
             lower.endsWith(".internal") || !lower.matches(Regex("[a-z0-9.-]+")) ||
             lower.substringAfterLast('.').all(Char::isDigit)) throw java.net.UnknownHostException("Blocked host")
         val results = Dns.SYSTEM.lookup(lower)
-        if (results.isEmpty() || results.any { !public(it) }) {
+        if (results.isEmpty() || results.any { !isPublicAddress(it) }) {
             throw java.net.UnknownHostException("Blocked destination")
         }
         return results
@@ -79,11 +79,15 @@ val mediaHttp: OkHttpClient = OkHttpClient.Builder()
 internal class MediaProxy(
     private val trace: YoutubeTrace? = null,
     private val allowedOrigin: ((String) -> Boolean)? = null,
+    private val onFailure: ((String, String) -> Unit)? = null,
+    private val consistentFamily: Boolean = false,
+    private val onRoute: ((String, Int) -> Unit)? = null,
 ) : AutoCloseable {
     private val server = ServerSocket(0, 24, InetAddress.getByName("127.0.0.1"))
     private val workers = Executors.newFixedThreadPool(32)
     private val slots = Semaphore(16)
     private val active = ConcurrentHashMap.newKeySet<Socket>()
+    private val family = java.util.concurrent.atomic.AtomicInteger(0)
     val url = "http://127.0.0.1:${server.localPort}"
 
     init {
@@ -141,17 +145,26 @@ internal class MediaProxy(
             }
         } catch (_: IOException) {
             trace?.add("proxy.dns.$category.error", SystemClock.elapsedRealtimeNanos() - dnsStart)
-            reply(client, "403 Forbidden")
+            onFailure?.invoke(target[0], "dns_or_address_policy")
+            // This is a local resolver/policy failure, not a 403 returned by the media CDN.
+            reply(client, "502 Bad Gateway")
             return
         }
         var connected: Socket? = null
-        for (address in addresses.take(4)) {
+        val candidates = if (consistentFamily) routeCandidates(addresses, family.get()) else addresses
+        for (address in candidates.take(4)) {
             val candidate = Socket()
             active.add(candidate)
             val connectStart = SystemClock.elapsedRealtimeNanos()
             try {
                 candidate.connect(InetSocketAddress(address, 443), 5_000)
                 trace?.add("proxy.tcp.$category.ok", SystemClock.elapsedRealtimeNanos() - connectStart)
+                val chosen = if (address is Inet6Address) 6 else 4
+                if (consistentFamily) {
+                    family.compareAndSet(0, chosen)
+                    if (family.get() != chosen) { active.remove(candidate); candidate.close(); continue }
+                }
+                onRoute?.invoke(target[0], chosen)
                 connected = candidate
                 break
             } catch (_: IOException) {
@@ -161,6 +174,7 @@ internal class MediaProxy(
             }
         }
         val upstream = connected ?: run {
+            onFailure?.invoke(target[0], "tcp_connect")
             reply(client, "502 Bad Gateway")
             return
         }
@@ -196,4 +210,11 @@ internal class MediaProxy(
         }
         throw IOException("Proxy request too long")
     }
+}
+
+/** Googlevideo URLs can be tied to the extraction IP. Do not mix IPv6 extraction with IPv4 CDN transfer. */
+internal fun routeCandidates(addresses: List<InetAddress>, family: Int): List<InetAddress> = when (family) {
+    4 -> addresses.filter { it !is Inet6Address }
+    6 -> addresses.filterIsInstance<Inet6Address>()
+    else -> addresses.sortedBy { it is Inet6Address }
 }

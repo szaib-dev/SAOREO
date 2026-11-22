@@ -41,7 +41,7 @@ private val Context.settingsData by preferencesDataStore("saoreo_settings")
 
 data class Settings(
     val quality: Quality = Quality.ASK,
-    val theme: String = "System",
+    val theme: String = "Dark",
     val wifi: Boolean = false,
     val autoShare: Boolean = false,
     val folderOrganization: Boolean = false,
@@ -100,7 +100,7 @@ class PreferencesStore(private val context: Context) {
         with(SettingKeys) {
             Settings(
                 quality = p[quality]?.let { name -> Quality.entries.firstOrNull { it.name == name } } ?: Quality.ASK,
-                theme = p[theme] ?: "System",
+                theme = p[theme] ?: "Dark",
                 wifi = p[wifi] ?: false, autoShare = p[autoShare] ?: false,
                 folderOrganization = p[folderOrganization] ?: false,
                 defaultAudio = p[defaultAudio] ?: (p[quality] == Quality.AUDIO.name),
@@ -126,7 +126,16 @@ class PreferencesStore(private val context: Context) {
     }
 }
 
-enum class JobState { QUEUED, RESOLVING, DOWNLOADING, COMPLETE, FAILED, CANCELLED }
+enum class JobState { QUEUED, RESOLVING, DOWNLOADING, PAUSED, COMPLETE, FAILED, CANCELLED }
+
+enum class MediaOrigin { DOWNLOADED, IMPORTED, CONVERTED, STATUS }
+
+internal fun legacyOrigin(source: String): String = when (source) {
+    "IMPORTED", "SHARED" -> MediaOrigin.IMPORTED.name
+    "CONVERTED" -> MediaOrigin.CONVERTED.name
+    "WHATSAPP", "BUSINESS" -> MediaOrigin.STATUS.name
+    else -> MediaOrigin.DOWNLOADED.name
+}
 
 @Entity(tableName = "downloads")
 data class Download(
@@ -152,14 +161,26 @@ data class Download(
     val clipEnd: Long? = null,
     val audioBitrate: Int? = null,
     @ColumnInfo(defaultValue = "0") val hiddenFromHistory: Boolean = false,
+    @ColumnInfo(defaultValue = "'DOWNLOADED'") val origin: String = legacyOrigin(source),
+    val localTitle: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    @ColumnInfo(defaultValue = "0") val duration: Long = 0,
+    val lyrics: String? = null,
 ) {
     val active: Boolean get() = state in setOf("QUEUED", "RESOLVING", "DOWNLOADING")
 }
 
 @Dao
 interface DownloadDao {
-    @Query("SELECT * FROM downloads WHERE hiddenFromHistory = 0 ORDER BY created DESC")
+    @Query("SELECT * FROM downloads WHERE hiddenFromHistory = 0 AND origin = 'DOWNLOADED' ORDER BY created DESC")
     fun observe(): Flow<List<Download>>
+    @Query("SELECT * FROM downloads WHERE state = 'COMPLETE' AND mime LIKE 'video/%' ORDER BY created DESC")
+    fun videoLibrary(): Flow<List<Download>>
+    @Query("UPDATE downloads SET localTitle = :title, artist = :artist, album = :album, lyrics = :lyrics WHERE id = :id")
+    suspend fun editTags(id: String, title: String, artist: String?, album: String?, lyrics: String?)
+    @Query("UPDATE downloads SET duration = :duration WHERE id = :id AND duration = 0")
+    suspend fun setDuration(id: String, duration: Long)
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun find(id: String): Download?
     @Query("SELECT * FROM downloads WHERE state IN ('QUEUED','RESOLVING','DOWNLOADING') AND source = :source")
@@ -186,13 +207,13 @@ interface DownloadDao {
     @Query("DELETE FROM downloads WHERE id = :id AND state NOT IN ('QUEUED','RESOLVING','DOWNLOADING','CONVERTING')")
     suspend fun remove(id: String)
     @Query("UPDATE downloads SET hiddenFromHistory = 1 WHERE id = :id") suspend fun hide(id: String)
-    @Query("UPDATE downloads SET hiddenFromHistory = 1 WHERE state = 'COMPLETE' AND mime LIKE 'audio/%'")
+    @Query("UPDATE downloads SET hiddenFromHistory = 1 WHERE origin = 'DOWNLOADED' AND state = 'COMPLETE' AND mime LIKE 'audio/%'")
     suspend fun hideAudioHistory()
-    @Query("DELETE FROM downloads WHERE hiddenFromHistory = 0 AND state NOT IN ('QUEUED','RESOLVING','DOWNLOADING','CONVERTING')")
+    @Query("DELETE FROM downloads WHERE hiddenFromHistory = 0 AND origin = 'DOWNLOADED' AND state NOT IN ('QUEUED','RESOLVING','DOWNLOADING','PAUSED','CONVERTING')")
     suspend fun clear()
 }
 
-@Database(entities = [Download::class, DownloadFolder::class, MusicPlaylist::class, PlaylistTrack::class, SongState::class], version = 2)
+@Database(entities = [Download::class, DownloadFolder::class, MusicPlaylist::class, PlaylistTrack::class, SongState::class], version = 3)
 abstract class DownloadDb : RoomDatabase() {
     abstract fun downloads(): DownloadDao
     internal abstract fun collections(): CollectionDao
@@ -212,14 +233,25 @@ internal val collectionsMigration = object : Migration(1, 2) {
     }
 }
 
+internal val libraryMigration = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE downloads ADD COLUMN origin TEXT NOT NULL DEFAULT 'DOWNLOADED'")
+        db.execSQL("UPDATE downloads SET origin = CASE WHEN source IN ('IMPORTED','SHARED') THEN 'IMPORTED' WHEN source = 'CONVERTED' THEN 'CONVERTED' WHEN source IN ('WHATSAPP','BUSINESS') THEN 'STATUS' ELSE 'DOWNLOADED' END")
+        for (column in listOf("localTitle TEXT", "artist TEXT", "album TEXT", "duration INTEGER NOT NULL DEFAULT 0", "lyrics TEXT"))
+            db.execSQL("ALTER TABLE downloads ADD COLUMN $column")
+        db.execSQL("ALTER TABLE song_state ADD COLUMN playCount INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("UPDATE song_state SET playCount = 1 WHERE played > 0")
+    }
+}
+
 class SaoreoApp : Application(), ImageLoaderFactory {
     val preferences by lazy { PreferencesStore(this) }
     internal val database by lazy { Room.databaseBuilder(this, DownloadDb::class.java, "downloads.db")
-        .addMigrations(collectionsMigration).build() }
+        .addMigrations(collectionsMigration, libraryMigration).build() }
     val dao get() = database.downloads()
     internal val collections by lazy { Collections(this) }
     internal val audioControl = AudioControl()
-    internal val youtubeDiagnostics = YoutubeDiagnostics()
+    internal val youtubeDiagnostics = YoutubeDiagnostics(this)
     val extractor by lazy { Extractor(this) }
     val downloads by lazy { DownloadQueue(this) }
     internal val downloadNotices by lazy { DownloadNotifications(this) }

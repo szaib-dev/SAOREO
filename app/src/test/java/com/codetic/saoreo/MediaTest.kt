@@ -104,4 +104,10 @@ class MediaTest {
             catch (_: java.net.UnknownHostException) { }
         }
     }
+    @Test fun instagramPlaylistMetadataUsesTheVideoEntry() {
+        val root = org.json.JSONObject("""{"title":"Public reel","entries":[{"id":"image"},{"formats":[{"format_id":"0","url":"https://cdn.example/video.mp4"}]}]}""")
+        val selected = mediaMetadataObject(root)
+        assertEquals("0", selected.getJSONArray("formats").getJSONObject(0).getString("format_id"))
+        assertEquals("Public reel", selected.getString("title"))
+    }
 }

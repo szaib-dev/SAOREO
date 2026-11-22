@@ -26,3 +26,19 @@ internal fun transferFailureReport(source: Source, stage: String, error: Throwab
     }
     return "${source.label} · $stage · $reason"
 }
+
+/** Keep upstream defaults first; only try other public clients after an actionable source error. */
+internal val youtubeClients: List<String?> = listOf(
+    null,
+    "youtube:player_client=web_safari",
+    "youtube:player_client=default,-web_embedded",
+)
+
+internal fun shouldRetryYoutubeClient(error: Throwable): Boolean {
+    if (error is java.util.concurrent.CancellationException || error is InterruptedException) return false
+    val text = error.message.orEmpty().lowercase(java.util.Locale.ROOT)
+    if (listOf("429", "private video", "sign in", "login", "age-restricted", "drm", "no space left", "permission denied")
+        .any { it in text }) return false
+    return listOf("403", "forbidden", "requested format", "no video formats", "no downloadable public formats",
+        "signature solving failed", "n challenge solving failed").any { it in text }
+}

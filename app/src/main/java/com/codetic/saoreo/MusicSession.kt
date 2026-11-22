@@ -34,8 +34,8 @@ internal fun localAudioItem(uri: String, title: String, artist: String? = null, 
         MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).setIsPlayable(true).build(),
     ).build()
 
-internal class SavedMusicQueue(context: Context) {
-    private val prefs = context.getSharedPreferences("music_session", Context.MODE_PRIVATE)
+internal class SavedMusicQueue(context: Context, name: String = "music_session") {
+    private val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
 
     fun save(player: Player) {
         if (player.mediaItemCount == 0) {
@@ -52,7 +52,7 @@ internal class SavedMusicQueue(context: Context) {
         }
         prefs.edit().putString("queue", items.toString()).putInt("index", player.currentMediaItemIndex)
             .putLong("position", player.currentPosition.coerceAtLeast(0)).putInt("repeat", player.repeatMode)
-            .putBoolean("shuffle", player.shuffleModeEnabled).apply()
+            .putBoolean("shuffle", player.shuffleModeEnabled).putFloat("speed", player.playbackParameters.speed).apply()
     }
 
     fun restore(player: Player) {
@@ -68,5 +68,6 @@ internal class SavedMusicQueue(context: Context) {
         player.setMediaItems(items, prefs.getInt("index", 0).coerceIn(items.indices), prefs.getLong("position", 0))
         player.repeatMode = prefs.getInt("repeat", Player.REPEAT_MODE_OFF).coerceIn(Player.REPEAT_MODE_OFF, Player.REPEAT_MODE_ALL)
         player.shuffleModeEnabled = prefs.getBoolean("shuffle", false)
+        player.setPlaybackSpeed(prefs.getFloat("speed", 1f).coerceIn(.5f, 2f))
     }
 }

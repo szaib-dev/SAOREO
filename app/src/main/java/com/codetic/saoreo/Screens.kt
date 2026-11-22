@@ -70,24 +70,42 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 private val dark = darkColorScheme(
-    primary = Color(0xffd0b9fa), onPrimary = Color(0xff34234e), primaryContainer = Color(0xff43325e),
-    onPrimaryContainer = Color(0xffebdeff), secondaryContainer = Color(0xff34303d),
-    onSecondaryContainer = Color(0xffece3f5), background = Color(0xff15141b), onBackground = Color(0xffeee9f2),
-    surface = Color(0xff15141b), onSurface = Color(0xffeee9f2), surfaceContainer = Color(0xff23212b),
-    surfaceContainerHigh = Color(0xff292631), outline = Color(0xff9b919e), outlineVariant = Color(0xff46404b),
+    primary = Lime, onPrimary = Ink, primaryContainer = Color(0xff374025), onPrimaryContainer = Lime,
+    secondary = Lavender, onSecondary = Ink, secondaryContainer = Color(0xff302a3e), onSecondaryContainer = Color(0xffeadcfa),
+    background = Color(0xff101014), onBackground = Color(0xfff5f3f7),
+    surface = Color(0xff101014), onSurface = Color(0xfff5f3f7), onSurfaceVariant = Color(0xffaaa8b3),
+    surfaceContainer = Color(0xff1c1c23), surfaceContainerLow = Color(0xff17171d),
+    surfaceContainerHigh = Color(0xff282831), surfaceContainerHighest = Color(0xff32323c),
+    outline = Color(0xff787681), outlineVariant = Color(0xff35343e),
 )
 private val light = lightColorScheme(
-    primary = Color(0xff624695), onPrimary = Color.White, primaryContainer = Color(0xffecdeff),
-    onPrimaryContainer = Color(0xff301750), secondaryContainer = Color(0xffeee7f4),
-    onSecondaryContainer = Color(0xff3d304a), background = Color(0xfffbf8fc), onBackground = Color(0xff221e28),
-    surface = Color(0xfffbf8fc), onSurface = Color(0xff221e28), surfaceContainer = Color(0xfff1edf5),
-    surfaceContainerHigh = Color(0xffede8f1), outline = Color(0xff7b7083), outlineVariant = Color(0xffded5e4),
+    primary = Color(0xff456014), onPrimary = Color.White, primaryContainer = Lime, onPrimaryContainer = Ink,
+    secondary = Color(0xff76549e), onSecondary = Color.White, secondaryContainer = Color(0xffeedffb), onSecondaryContainer = Ink,
+    background = Color(0xfff5f5f3), onBackground = Ink,
+    surface = Color(0xfff5f5f3), onSurface = Ink, onSurfaceVariant = Color(0xff66636e),
+    surfaceContainer = Color.White, surfaceContainerLow = Color(0xfffafaf8),
+    surfaceContainerHigh = Color(0xffe9e9e5), surfaceContainerHighest = Color(0xffe0e0db),
+    outline = Color(0xff817e89), outlineVariant = Color(0xffdedce2),
 )
 
 @Composable
 internal fun AppTheme(settings: Settings, content: @Composable () -> Unit) {
     val useDark = settings.theme == "Dark" || settings.theme == "System" && isSystemInDarkTheme()
-    MaterialTheme(colorScheme = if (useDark) dark else light, content = content)
+    val view = LocalView.current
+    DisposableEffect(view, useDark) {
+        val activity = view.context as? android.app.Activity
+        activity?.let {
+            androidx.core.view.WindowCompat.getInsetsController(it.window, view).apply {
+                isAppearanceLightStatusBars = !useDark
+                isAppearanceLightNavigationBars = !useDark
+            }
+        }
+        onDispose { }
+    }
+    MaterialTheme(colorScheme = if (useDark) dark else light,
+        shapes = Shapes(extraSmall = RoundedCornerShape(10.dp), small = RoundedCornerShape(14.dp),
+            medium = RoundedCornerShape(20.dp), large = RoundedCornerShape(28.dp), extraLarge = RoundedCornerShape(32.dp)),
+        content = content)
 }
 
 class MainActivity : ComponentActivity() {
@@ -226,173 +244,64 @@ private fun SharedFile(app: SaoreoApp, uri: Uri, close: () -> Unit) {
     message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 }
 
-private enum class Tab(val label: String, val icon: ImageVector?) {
-    HOME("Home", Icons.Outlined.Home),
-    DOWNLOADS("Downloads", Icons.Outlined.Download),
-    MUSIC("Music", null),
-    STATUS("Status", Icons.Outlined.PhotoLibrary),
-    TOOLS("Tools", Icons.Outlined.Build),
-}
-
 @Composable
 private fun MainScreen(app: SaoreoApp, settings: Settings, shortcutEvents: Int, downloadEvents: Int, transcriptEvents: Int) {
-    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
-    var page by rememberSaveable { mutableStateOf<String?>(null) }
-    var input by rememberSaveable { mutableStateOf("") }
-    var search by rememberSaveable { mutableStateOf(false) }
-    var overflow by remember { mutableStateOf(false) }
-    var libraryAction by remember { mutableIntStateOf(0) }
-    var jobsOnly by rememberSaveable { mutableStateOf(false) }
-    val context = LocalContext.current
-    val stateHolder = rememberSaveableStateHolder()
-    val records by app.dao.observe().collectAsStateWithLifecycle(emptyList())
-    val transfers by app.downloadNotices.progress.collectAsStateWithLifecycle()
-    val player = rememberMusicController(app).first
-    LaunchedEffect(shortcutEvents) { if (shortcutEvents > 0) { tab = Tab.HOME; page = null } }
-    LaunchedEffect(transcriptEvents) { if (transcriptEvents > 0) { tab = Tab.TOOLS; page = "Transcript" } }
-    LaunchedEffect(downloadEvents) { if (downloadEvents > 0) { tab = Tab.DOWNLOADS; page = null; jobsOnly = true } }
-    BackHandler(page != null || search || jobsOnly && tab == Tab.DOWNLOADS) {
-        if (page != null) page = null else if (search) search = false else jobsOnly = false
-    }
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            Surface(color = MaterialTheme.colorScheme.background) {
-                Row(Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 56.dp).padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (page != null) IconButton({ page = null }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
-                    else if (tab == Tab.HOME) {
-                        Mark()
-                        Spacer(Modifier.width(10.dp))
-                    }
-                    Text(page ?: if (tab == Tab.HOME) "SAOREO" else tab.label, Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (page == null && tab == Tab.DOWNLOADS) {
-                        IconButton({ search = !search }) { Icon(Icons.Outlined.Search, "Search downloads") }
-                        Box {
-                            IconButton({ overflow = true }) { Icon(Icons.Outlined.MoreVert, "Download options") }
-                            DropdownMenu(overflow, { overflow = false }) {
-                                DropdownMenuItem({ Text(if (jobsOnly) "Saved media" else "Download activity") }, {
-                                    overflow = false
-                                    jobsOnly = !jobsOnly
-                                })
-                                DropdownMenuItem({ Text("Import media") }, { overflow = false; libraryAction++ })
-                            }
-                        }
-                    }
-                    if (page != "Settings") IconButton({ page = "Settings" }) {
-                        Icon(Icons.Outlined.Settings, "Settings")
-                    }
-                }
-            }
-        },
-        bottomBar = {
-            if (page == null) Column {
-                MusicMiniPlayer(app, player, onOpen = { context.startActivity(MusicActivity.open(context, nowPlaying = true)) })
-                Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-                    BoxWithConstraints(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars)) {
-                        val labelsFit = maxWidth >= (336 * LocalDensity.current.fontScale).dp
-                        Row(Modifier.fillMaxWidth().selectableGroup().heightIn(min = 60.dp)) {
-                            Tab.entries.forEach { item ->
-                                val selected = tab == item
-                                val accent by animateColorAsState(if (selected) MaterialTheme.colorScheme.primaryContainer
-                                    else Color.Transparent, label = "Tab selection")
-                                Column(Modifier.weight(1f).heightIn(min = 60.dp)
-                                    .selectable(selected, role = Role.Tab, onClick = {
-                                        tab = item
-                                        search = false
-                                        jobsOnly = false
-                                    }).semantics { if (!labelsFit) contentDescription = item.label },
-                                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                    Box(Modifier.size(44.dp, 28.dp).background(accent, RoundedCornerShape(16.dp)),
-                                        contentAlignment = Alignment.Center) {
-                                        val tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
-                                            else MaterialTheme.colorScheme.onSurfaceVariant
-                                        val icon = item.icon
-                                        if (icon == null) Icon(painterResource(R.drawable.ic_music_note), null, Modifier.size(21.dp), tint)
-                                        else Icon(icon, null, Modifier.size(21.dp), tint)
-                                    }
-                                    if (labelsFit) Text(item.label, Modifier.padding(top = 3.dp), maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-    ) { inner ->
-        Box(Modifier.fillMaxSize().padding(inner).imePadding()) {
-            val modifier = Modifier.fillMaxSize()
-            when (page) {
-                "Settings" -> SettingsScreen(app, settings, modifier)
-                "Transcript" -> stateHolder.SaveableStateProvider("transcript") { TranscriptScreen(app, modifier) }
-                "Convert to MP3" -> ConversionTools(app, modifier)
-                else -> when (tab) {
-                    Tab.HOME -> Column(modifier.verticalScroll(rememberScrollState()).padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Download from a link", style = MaterialTheme.typography.titleMedium)
-                        stateHolder.SaveableStateProvider("home-link") {
-                            LinkPanel(app, settings, input, onInput = { input = it })
-                        }
-                        val active = records.filter { it.active }.take(3)
-                        if (active.isNotEmpty()) {
-                            ListItem(headlineContent = { Text("Download activity") },
-                                modifier = Modifier.clickable { tab = Tab.DOWNLOADS; jobsOnly = true })
-                            active.forEach { item ->
-                                val transfer = transfers[item.id]
-                                ListItem(headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                    supportingContent = { Text(listOfNotNull(transfer?.stage ?: "Queued",
-                                        transfer?.bytes?.takeIf { it > 0 }?.let(::sizeLabel)).joinToString(" · ")) },
-                                    modifier = Modifier.clickable { tab = Tab.DOWNLOADS; jobsOnly = true })
-                            }
-                        }
-                        val recent = records.filter { it.state == JobState.COMPLETE.name && it.galleryUri != null }.take(3)
-                        if (recent.isNotEmpty()) {
-                            Text("Recently saved", style = MaterialTheme.typography.titleMedium)
-                            recent.forEach { item ->
-                                ListItem(headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                    supportingContent = { Text(Source.valueOf(item.source).label) },
-                                    leadingContent = { ThumbnailForDownload(item, Modifier.size(42.dp)) },
-                                    modifier = Modifier.clickable { playSavedMedia(context, item) })
-                            }
-                        }
-                    }
-                    Tab.DOWNLOADS -> stateHolder.SaveableStateProvider("downloads") {
-                        DownloadsScreen(app, settings, modifier, search, jobsOnly, libraryAction) { tab = Tab.HOME }
-                    }
-                    Tab.MUSIC -> stateHolder.SaveableStateProvider("music") {
-                        MusicLibrary(app, null, false, {}, controller = player, embedded = true)
-                    }
-                    Tab.STATUS -> stateHolder.SaveableStateProvider("statuses") { StatusScreen(app, settings, modifier) }
-                    Tab.TOOLS -> Column(modifier.padding(horizontal = 12.dp).verticalScroll(rememberScrollState())) {
-                        ListItem(headlineContent = { Text("Transcript") },
-                            supportingContent = { Text("Read, copy, and export captions") },
-                            leadingContent = { Icon(Icons.AutoMirrored.Outlined.List, null) },
-                            trailingContent = { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null) },
-                            modifier = Modifier.clickable { page = "Transcript" })
-                        ListItem(headlineContent = { Text("MP4-to-MP3 conversion") },
-                            supportingContent = { Text("Save audio from a video on your device") },
-                            leadingContent = { Icon(painterResource(R.drawable.ic_music_note), null) },
-                            trailingContent = { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null) },
-                            modifier = Modifier.clickable { page = "Convert to MP3" })
-                    }
-                }
-            }
-        }
-    }
+    SaoreoShell(app, settings, shortcutEvents, downloadEvents, transcriptEvents)
 }
 
 @Composable
-private fun ConversionTools(app: SaoreoApp, modifier: Modifier) {
+internal fun ConversionTools(app: SaoreoApp, modifier: Modifier) {
     var file by rememberSaveable { mutableStateOf<String?>(null) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> file = uri?.toString() }
-    Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button({ picker.launch(arrayOf("video/mp4")) }) { Text("Choose MP4") }
-        ConversionProgress(app)
+    var videoOutput by rememberSaveable { mutableStateOf(false) }
+    var bitrate by rememberSaveable { mutableIntStateOf(192) }
+    val current by app.converter.status.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) file = uri.toString()
     }
-    file?.let { ConversionSheet(app, Uri.parse(it), null, true) { file = null } }
+    val selected by produceState<Result<ConversionInput>?>(null, file, videoOutput) {
+        value = null
+        val uri = file ?: return@produceState
+        value = runCatching { inspectVideo(app, Uri.parse(uri), null, false, videoOutput) }
+            .onFailure { if (it is CancellationException) throw it }
+    }
+    val format = if (videoOutput) "MP4" else "MP3"
+    Column(modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Convert media", style = MaterialTheme.typography.headlineSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!videoOutput, { if (videoOutput) { videoOutput = false; file = null } }, { Text("Video to MP3") })
+            FilterChip(videoOutput, { if (!videoOutput) { videoOutput = true; file = null } }, { Text("MP3 to MP4") })
+        }
+        if (videoOutput) Text("Create a video with a solid background and your MP3 audio.",
+            style = MaterialTheme.typography.bodySmall)
+        OutlinedButton({ picker.launch(if (videoOutput) arrayOf("audio/mpeg", "audio/mp3") else arrayOf("video/*")) },
+            enabled = current?.active != true, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Outlined.FolderOpen, null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (videoOutput) "Choose MP3" else "Choose video")
+        }
+        file?.let { uri ->
+            val source = selected?.getOrNull()?.takeIf { it.uri.toString() == uri }
+            Text(source?.filename ?: if (selected?.isFailure == true) "Can’t read this file" else "Reading file…",
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (source?.durationMs?.let { it > 0 } == true) Text(playbackTime(source.durationMs))
+            if (source != null && !videoOutput && current?.active != true) {
+                ChoiceMenu("$bitrate kbps", mp3Rates, { "$it kbps" }) { bitrate = it }
+            }
+            Button({
+                if (source != null && !app.converter.start(source, bitrate, videoOutput)) toast(context, "Couldn’t start conversion.")
+            }, enabled = source != null && current?.active != true, modifier = Modifier.fillMaxWidth()) { Text("Convert to $format") }
+        }
+        ConversionProgress(app)
+        current?.output?.let { uri ->
+            Button({ scope.launch {
+                val converted = app.dao.byUri(uri.toString())
+                if (converted != null) playSavedMedia(context, converted)
+                else toast(context, "The converted file is unavailable.")
+            } }, Modifier.fillMaxWidth()) { Text("Play converted file") }
+        }
+    }
 }
 
 @Composable
@@ -402,9 +311,9 @@ private fun Mark() {
 }
 
 @Composable
-private fun LinkPanel(
+internal fun LinkPanel(
     app: SaoreoApp, settings: Settings, initial: String, share: Boolean = false,
-    onInput: (String) -> Unit = {}, close: () -> Unit = {},
+    onInput: (String) -> Unit = {}, close: () -> Unit = {}, onQueued: () -> Unit = {}, requirePreview: Boolean = false,
 ) {
     val context = LocalContext.current
     val focus = LocalFocusManager.current
@@ -471,6 +380,7 @@ private fun LinkPanel(
                     notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             }
+            onQueued()
         } catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
             actionError = if (accepted == 0 && failure is SectionFailure) failure.message else if (accepted > 0) "$accepted queued. Android could not queue the remaining downloads."
@@ -532,7 +442,7 @@ private fun LinkPanel(
             },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(); if (!loading) revision++ }),
-            shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth(),
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = {
@@ -547,7 +457,7 @@ private fun LinkPanel(
             }, Modifier.weight(1f)) {
                 Icon(Icons.Outlined.ContentPaste, null, Modifier.size(17.dp))
                 Spacer(Modifier.width(7.dp))
-                Text("Paste")
+                Text("Paste from clipboard")
             }
         }
     }
@@ -567,9 +477,9 @@ private fun LinkPanel(
         val audio = selection?.audioOnly ?: (requestedQuality == Quality.AUDIO)
         if (result?.choices?.any { it.imageUrl != null } != true) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(!audio, onClick = { setPreset(false) }, label = { Text("MP4") },
+                FilterChip(!audio, onClick = { setPreset(false) }, label = { Text("Video · MP4") },
                     enabled = result == null || result.choices.any { !it.audioOnly })
-                FilterChip(audio, onClick = { setPreset(true) }, label = { Text("MP3") },
+                FilterChip(audio, onClick = { setPreset(true) }, label = { Text("Music · MP3") },
                     enabled = result == null || result.choices.any { it.audioOnly })
             }
         }
@@ -615,7 +525,7 @@ private fun LinkPanel(
             { folder = it }, { playlist = it }, { bitrate = it })
         Button(
             onClick = { focus.clearFocus(); scope.launch { accept() } },
-            enabled = !accepting && (!rangeOn || section != null && selection?.imageUrl == null) &&
+            enabled = !accepting && (!requirePreview || preview != null && !loading && error == null) && (!rangeOn || section != null && selection?.imageUrl == null) &&
                 (selection != null || link.source == Source.YOUTUBE && !rangeOn || result == null && audioPreset != null),
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
         ) {
@@ -652,17 +562,35 @@ fun Thumb(model: Any?, modifier: Modifier = Modifier) {
     }
 }
 
+internal val LocalPickerVisibility = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> ChoiceMenu(label: String, options: List<T>, text: (T) -> String, onSelect: (T) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Box {
-        OutlinedButton(onClick = { expanded = true }) {
-            Text(label, maxLines = 2)
-            Icon(Icons.Outlined.ArrowDropDown, null)
-        }
-        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { option ->
-                DropdownMenuItem(text = { Text(text(option)) }, onClick = { expanded = false; onSelect(option) })
+    val notifyExpanded = LocalPickerVisibility.current
+    DisposableEffect(expanded) { notifyExpanded(expanded); onDispose { if (expanded) notifyExpanded(false) } }
+    TextButton({ expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        modifier = Modifier.heightIn(min = 40.dp)) {
+        Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge, overflow = TextOverflow.Ellipsis)
+        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
+    }
+    if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 4.dp)) {
+            Text("Choose an option", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(bottom = 12.dp))
+            androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(options.size) { index ->
+                    val option = options[index]
+                    val selected = text(option) == label
+                    ListItem(headlineContent = { Text(text(option)) },
+                        trailingContent = { if (selected) Icon(Icons.Outlined.Check, "Selected", tint = MaterialTheme.colorScheme.primary) },
+                        colors = ListItemDefaults.colors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent),
+                        modifier = Modifier.padding(vertical = 2.dp).clip(RoundedCornerShape(16.dp)).clickable {
+                            expanded = false; onSelect(option)
+                        })
+                }
             }
         }
     }

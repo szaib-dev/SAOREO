@@ -83,7 +83,7 @@ class DownloadQueue(private val app: SaoreoApp) {
 
     suspend fun retry(item: Download, settings: Settings) = app.publications.withLock {
         val latest = app.dao.find(item.id) ?: return@withLock
-        if (latest.state !in setOf(JobState.FAILED.name, JobState.CANCELLED.name)) return@withLock
+        if (latest.state !in setOf(JobState.FAILED.name, JobState.CANCELLED.name, JobState.PAUSED.name)) return@withLock
         val reset = latest.copy(state = JobState.QUEUED.name, error = null, progress = -1)
         if (app.dao.update(reset) == 1) schedule(reset, settings)
     }
@@ -111,9 +111,17 @@ class DownloadQueue(private val app: SaoreoApp) {
         }
     }
 
-    suspend fun cancel(item: Download) = app.publications.withLock {
+    suspend fun pause(item: Download) = app.publications.withLock {
         val latest = app.dao.find(item.id) ?: return@withLock
         if (!latest.active) return@withLock
+        app.dao.update(latest.copy(state = JobState.PAUSED.name, error = null))
+        withContext(Dispatchers.IO) { manager.cancelUniqueWork(item.id).result.get() }
+        app.downloadNotices.end(item.id)
+    }
+
+    suspend fun cancel(item: Download) = app.publications.withLock {
+        val latest = app.dao.find(item.id) ?: return@withLock
+        if (!latest.active && latest.state != JobState.PAUSED.name) return@withLock
         app.dao.update(latest.copy(state = JobState.CANCELLED.name, error = "Cancelled"))
         withContext(Dispatchers.IO) { manager.cancelUniqueWork(item.id).result.get() }
         app.downloadNotices.end(item.id)
@@ -219,6 +227,11 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val requested = Quality.valueOf(item.quality)
         val choice = if (item.choice == null) preferredDownload(preview.choices, requested)
             else preview.choices.firstOrNull { it.id == item.choice }
+                ?: (if (link.source == Source.INSTAGRAM) {
+                    val audioSelected = item.choice.startsWith("mp3:")
+                    val height = Regex("""^(\d+)p""").find(item.detail.orEmpty())?.groupValues?.get(1)?.toIntOrNull()
+                    preview.choices.firstOrNull { it.audioOnly == audioSelected && it.height == height }
+                } else null)
                 ?: if (requested == Quality.AUDIO || item.detail.orEmpty().startsWith("Audio ·")) {
                     preview.choices.firstOrNull { it.audioOnly && it.selector == item.choice }
                         ?: selectChoice(preview.choices, Quality.AUDIO, "mp4")
@@ -248,6 +261,24 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
         }
         suspend fun downloadSource(): File {
+            val instagramStream = choice.reusableStreams.singleOrNull()?.takeIf {
+                link.source == Source.INSTAGRAM && !choice.audioOnly && choice.extension == "mp4" && it.extension == "mp4"
+            }
+            if (instagramStream != null) {
+                try {
+                    val file = downloadDirect(instagramStream.url, link.source, "mp4", workspace,
+                        MAX_DIRECT_VIDEO, settings.resume, progressValue::set, instagramStream.headers)
+                    try {
+                        withContext(Dispatchers.IO) { verifyDownloadedMedia(file, "video/mp4", choice.requiresAudio) }
+                        return file
+                    } catch (failure: InvalidMediaException) {
+                        file.delete()
+                        throw failure
+                    }
+                } catch (failure: IOException) {
+                    Log.i("SAOREO", "Instagram CDN transfer failed; resolving with extractor")
+                }
+            }
             val directUrl = choice.imageUrl ?: choice.directVideoUrl
             return if (directUrl != null) downloadDirect(
                 directUrl, link.source, choice.extension, workspace,
@@ -357,7 +388,7 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
     private suspend fun downloadDirect(
         url: String, source: Source, extension: String, folder: File, maximum: Long, resume: Boolean,
-        progress: (TransferProgress) -> Unit,
+        progress: (TransferProgress) -> Unit, headers: Map<String, String> = emptyMap(),
     ): File = suspendCancellableCoroutine { continuation ->
         val started = SystemClock.elapsedRealtime()
         folder.mkdirs()
@@ -368,9 +399,15 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
             ?.takeIf { it.firstOrNull()?.code == 34 && it.lastOrNull()?.code == 34 && it.length <= 256 } else null
         val offset = if (tag != null) partial.length() else 0L
         val request = Request.Builder().url(url).header("Accept-Encoding", "identity").apply {
+            headers.forEach { (name, value) -> header(name, value) }
             if (tag != null) { header("Range", "bytes=$offset-"); header("If-Range", tag) }
         }.build()
-        val call = mediaHttp.newCall(request)
+        val client = if (source == Source.INSTAGRAM) mediaHttp.newBuilder().addNetworkInterceptor { chain ->
+            val target = chain.request().url
+            if (!streamCdnHost(source, target.host)) throw IOException("Unexpected Instagram CDN destination")
+            chain.proceed(chain.request())
+        }.build() else mediaHttp
+        val call = client.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {

@@ -21,7 +21,16 @@ internal enum class YoutubeTrial(val extractorArgument: String? = null) {
     DEFAULT, WEB("youtube:player_client=web"), TV("youtube:player_client=tv")
 }
 
-internal class YoutubeDiagnostics {
+internal class YoutubeDiagnostics(private val context: Context? = null) {
+    private val http = ArrayDeque<String>()
+
+    @Synchronized
+    fun recordHttp(json: String) {
+        val line = json.take(2500)
+        http.addLast(line)
+        while (http.size > 100) http.removeFirst()
+        context?.let { runCatching { File(it.noBackupFilesDir, "youtube-http.log").writeText(http.joinToString("\n")) } }
+    }
     private val _mode = MutableStateFlow(YoutubeTraceMode.OFF)
     val mode = _mode.asStateFlow()
     private val reports = ArrayDeque<YoutubeTrace>()
@@ -55,12 +64,15 @@ internal class YoutubeDiagnostics {
             included.addFirst(report)
             length += report.length
         }
-        return included.joinToString("\n\n") +
+        val network = http.joinToString("\n").ifBlank {
+            context?.let { runCatching { File(it.noBackupFilesDir, "youtube-http.log").readText().takeLast(100_000) }.getOrDefault("") }.orEmpty()
+        }
+        return "yt-dlp ${Extractor.ENGINE_VERSION} · HTTP evidence (signed parameters and cookies omitted)\n$network\n\n" + included.joinToString("\n\n") +
             if (included.size < reports.size) "\nOlder reports exceeded the clipboard limit." else ""
     }
 
     @Synchronized
-    fun clear() { reports.clear() }
+    fun clear() { reports.clear(); http.clear(); context?.let { File(it.noBackupFilesDir, "youtube-http.log").delete() } }
 }
 
 internal class YoutubeTrace(private val id: Int, val mode: YoutubeTraceMode, val client: YoutubeTrial = YoutubeTrial.DEFAULT) {

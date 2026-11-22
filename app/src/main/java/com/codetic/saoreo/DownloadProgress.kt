@@ -79,6 +79,7 @@ internal class DownloadNotifications(private val app: SaoreoApp) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
             .setContentIntent(downloads(key)).setGroup("saoreo-downloads").setSilent(true)
             .setOngoing(true).setProgress(100, progress.percent.coerceAtLeast(0), progress.percent < 0)
+            .addAction(0, "Pause", action(key, DownloadActionReceiver.PAUSE))
             .addAction(0, "Cancel", action(key, DownloadActionReceiver.CANCEL)).build()
     }
 
@@ -111,6 +112,7 @@ internal class DownloadNotifications(private val app: SaoreoApp) {
         channels()
         notify(waitingId(key), base(waitingChannel, title).setContentText(status)
             .setContentIntent(downloads(key)).setOngoing(true).setSilent(true)
+            .addAction(0, "Pause", action(key, DownloadActionReceiver.PAUSE))
             .addAction(0, "Cancel", action(key, DownloadActionReceiver.CANCEL)).build())
     }
 
@@ -158,13 +160,14 @@ internal class DownloadNotifications(private val app: SaoreoApp) {
 class DownloadActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getStringExtra("download_id") ?: return
-        if (intent.action !in setOf(CANCEL, RETRY)) return
+        if (intent.action !in setOf(CANCEL, RETRY, PAUSE)) return
         val pending = goAsync()
         val app = context.applicationContext as SaoreoApp
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val item = app.dao.find(id) ?: return@launch
                 if (intent.action == CANCEL) app.downloads.cancel(item)
+                else if (intent.action == PAUSE) app.downloads.pause(item)
                 else if (MediaLink.parse(item.url) != null) app.downloads.retry(item, app.preferences.flow.first())
             } catch (_: Exception) {
                 // WorkManager failures are reflected in the existing transfer record.
@@ -173,6 +176,7 @@ class DownloadActionReceiver : BroadcastReceiver() {
     }
 
     companion object {
+        internal const val PAUSE = "com.codetic.saoreo.DOWNLOAD_PAUSE"
         internal const val CANCEL = "com.codetic.saoreo.DOWNLOAD_CANCEL"
         internal const val RETRY = "com.codetic.saoreo.DOWNLOAD_RETRY"
     }

@@ -161,6 +161,7 @@ fun StatusScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modifi
         }
     }
     Column(modifier) {
+        PageHeading("Keep the moment.", "Save photos and videos from your local status folders.", Modifier.padding(horizontal = 24.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp), verticalAlignment = Alignment.CenterVertically) {
             ChoiceMenu(source.label, listOf(Source.WHATSAPP, Source.BUSINESS), Source::label) { source = it }
             Spacer(Modifier.weight(1f))
@@ -190,7 +191,9 @@ fun StatusScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modifi
         } else {
             Row(Modifier.padding(horizontal = 15.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("All", "Photos", "Videos").forEach { label ->
-                    FilterChip(filter == label, { filter = label; selected = emptySet() }, { Text(label) })
+                    FilterChip(filter == label, { filter = label; selected = emptySet() }, { Text(label) },
+                        shape = RoundedCornerShape(24.dp), colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary, selectedLabelColor = MaterialTheme.colorScheme.onPrimary))
                 }
             }
             if (selected.isNotEmpty()) TextButton(onClick = { save(filtered.filter { it.uri in selected }) }, enabled = !saving,

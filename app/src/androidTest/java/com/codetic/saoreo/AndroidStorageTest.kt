@@ -41,7 +41,7 @@ class AndroidStorageTest {
             val original = app.statuses.fromUri(input!!)
             val first = app.statuses.save(original, Source.WHATSAPP)
             val second = app.statuses.save(original, Source.WHATSAPP)
-            record = app.dao.observe().first().firstOrNull { it.galleryUri == first.first.toString() }
+            record = app.dao.byUri(first.first.toString())
             assertTrue(first.second)
             assertFalse(second.second)
             assertEquals(first.first, second.first)

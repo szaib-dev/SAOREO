@@ -6,6 +6,8 @@ import android.content.ClipboardManager
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -57,10 +59,12 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modifier,
-                    search: Boolean = false, jobsOnly: Boolean = false, importAction: Int = 0, paste: () -> Unit = {}) {
+                    search: Boolean = false, jobsOnly: Boolean = false, importAction: Int = 0, onActivity: ((Boolean) -> Unit)? = null, libraryVideos: Boolean = false, paste: () -> Unit = {}) {
     val context = LocalContext.current
-    val downloads by app.dao.observe().collectAsStateWithLifecycle(initialValue = emptyList())
+    val downloads by (if (libraryVideos) app.dao.videoLibrary() else app.dao.observe()).collectAsStateWithLifecycle(initialValue = emptyList())
     val transferProgress by app.downloadNotices.progress.collectAsStateWithLifecycle()
+    var sort by rememberSaveable { mutableStateOf("Newest") }
+    var fileDetails by remember { mutableStateOf<Download?>(null) }
     var filter by rememberSaveable { mutableStateOf("All") }
     var query by rememberSaveable { mutableStateOf("") }
     var moveFolder by remember { mutableStateOf<DownloadFolder?>(null) }
@@ -93,7 +97,13 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
             }
         }
     val failures = downloads.filter { it.state in setOf("FAILED", "CANCELLED") && matchesSearch(it) }
-    val history = if (jobsOnly) failures else saved
+    val paused = downloads.filter { it.state == JobState.PAUSED.name && matchesSearch(it) }
+    val history = (if (jobsOnly) paused + failures else saved).let { rows -> when (sort) {
+        "Title" -> rows.sortedBy { it.title.lowercase() }
+        "Size" -> rows.sortedByDescending { it.bytes ?: 0 }
+        "Oldest" -> rows.sortedBy { it.created }
+        else -> rows.sortedByDescending { it.created }
+    } }
     val list = active + history
     fun act(block: suspend () -> Unit) {
         scope.launch {
@@ -104,7 +114,7 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) act {
             if (app.contentResolver.getType(uri)?.startsWith("audio/") == true) app.collections.importAudio(uri)
-            else app.statuses.save(app.statuses.fromUri(uri), Source.SHARED)
+            else app.collections.importVideo(uri)
         }
     }
     var handledImport by rememberSaveable { mutableIntStateOf(0) }
@@ -114,17 +124,41 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
             picker.launch(arrayOf("audio/*", "video/*", "image/*"))
         }
     }
-    Column(modifier) {
+    var editingLink by remember { mutableStateOf(false) }
+    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item(key = "download-controls") {
+            Column(Modifier.fillMaxWidth().animateContentSize()) {
+                if (!libraryVideos) LinkInput(app, settings, Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                    onEditing = { editingLink = it }, onQueued = { onActivity?.invoke(true) })
+                AnimatedVisibility(!editingLink) {
+                    Column {
+
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("${saved.size} files · ${sizeLabel(saved.sumOf { it.bytes ?: 0 })}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            ChoiceMenu(sort, listOf("Newest", "Oldest", "Title", "Size"), { it }) { sort = it }
+            if (settings.folderOrganization && !libraryVideos) IconButton({ addFolder = true }) { Icon(painterResource(R.drawable.ic_folder_new), "New folder") }
+            if (libraryVideos) IconButton({ picker.launch(arrayOf("video/*")) }) { Icon(Icons.Outlined.Add, "Import video") }
+        }
+        if (onActivity != null) Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TextButton({ onActivity(false) }) { Text("Saved", fontWeight = if (!jobsOnly) FontWeight.Bold else FontWeight.Normal) }
+            TextButton({ onActivity(true) }) { Text("Activity (${active.size + failures.size})", fontWeight = if (jobsOnly) FontWeight.Bold else FontWeight.Normal) }
+        }
         if (search) OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             singleLine = true, label = { Text(if (folder != null && settings.folderOrganization && !jobsOnly)
                 "Search this folder" else "Search downloads") })
-        if (!jobsOnly) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+        if (!jobsOnly && !libraryVideos) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("All", "Videos", "Audio", "Images").forEach { type ->
-                FilterChip(type == filter, onClick = { filter = type }, label = { Text(type) })
+                FilterChip(type == filter, onClick = { filter = type }, label = { Text(type) },
+                    shape = RoundedCornerShape(24.dp), colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Lime, selectedLabelColor = Ink))
             }
         }
-        if (settings.folderOrganization && !jobsOnly) {
+        if (settings.folderOrganization && !jobsOnly && (folders.isNotEmpty() || folder != null)) {
             val current = folders.firstOrNull { it.id == folder }
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (current != null) IconButton({ folder = current.parent.takeIf(String::isNotEmpty) }) {
@@ -152,15 +186,17 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                 }
             }
         }
-        if (list.isEmpty()) {
+                    }
+                }
+            }
+        }
+        if (list.isEmpty()) item { Column {
+
             EmptyState(if (jobsOnly) "No download activity" else if (search && query.isNotBlank())
                 "No matching media" else "Nothing saved here")
-            if (!jobsOnly && (!search || query.isBlank())) Row(Modifier.padding(horizontal = 12.dp)) {
-                TextButton(paste) { Text("Paste link") }
-                TextButton({ picker.launch(arrayOf("audio/*", "video/*", "image/*")) }) { Text("Import media") }
-            }
-        } else LazyColumn(contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (libraryVideos) TextButton({ picker.launch(arrayOf("video/*")) }, Modifier.padding(horizontal = 20.dp)) { Text("Import a video") }
+                } } else {
+
             if (active.isNotEmpty()) item { Text("In progress", Modifier.padding(6.dp), style = MaterialTheme.typography.titleSmall) }
             items(list, key = { it.id }) { item ->
                 if (item.id == history.firstOrNull()?.id) {
@@ -183,7 +219,8 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                 }
                 val transfer = transferProgress[item.id]
                 val stateLabel = if (transfer != null && item.active) {
-                    listOfNotNull(transfer.stage, transfer.bytes.takeIf { it > 0 }?.let(::sizeLabel),
+                    listOfNotNull(transfer.stage, transfer.bytes.takeIf { it > 0 }?.let { bytes -> sizeLabel(bytes) + (transfer.total?.let { " / ${sizeLabel(it)}" } ?: "") },
+                        transfer.bytesPerSecond?.let { "${sizeLabel(it)}/s" }, transfer.eta?.let { "${durationLabel(it)} left" },
                         transfer.percent.takeIf { it >= 0 }?.let { "$it%" }).joinToString(" · ")
                 } else when (item.state) {
                     "QUEUED" -> if (!hasDownloadNetwork(context, settings.wifi)) "Waiting for connection"
@@ -191,14 +228,10 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                     "RESOLVING" -> "Retrieving media"
                     "DOWNLOADING" -> if (item.progress < 0) "Downloading" else "Downloading · ${item.progress}%"
                     "COMPLETE" -> if (available) "Saved" else "File unavailable"
+                    "PAUSED" -> "Paused · Ready to resume"
                     "CANCELLED" -> "Cancelled"
                     "CONVERTING" -> "Converting to MP3"
                     else -> item.error?.substringBefore('\n') ?: "Download failed"
-                }
-                val dimensions by produceState<String?>(null, uri, available) {
-                    if (canOpen && (video || mime.startsWith("image/"))) value = withContext(Dispatchers.IO) {
-                        runCatching { savedDimensions(app, checkNotNull(uri), video) }.getOrNull()
-                    }
                 }
                 val duration by produceState<String?>(null, uri, available) {
                     if (canOpen && (video || audio)) value = withContext(Dispatchers.IO) {
@@ -211,9 +244,8 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                         }.getOrNull()
                     }
                 }
-                Surface(shape = RoundedCornerShape(10.dp), color = if (item.active) MaterialTheme.colorScheme.surfaceContainer
-                    else MaterialTheme.colorScheme.surface) {
-                    Column(Modifier.padding(horizontal = 6.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             val isImage = item.mime?.startsWith("image/") == true
                             val model = if (canOpen) {
@@ -223,19 +255,17 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                 onClickLabel = if (video || audio) "Play" else "Open", onClick = ::open,
                             ) else Modifier), horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                Thumb(model, Modifier.size(48.dp).clip(RoundedCornerShape(9.dp)))
+                                if (audio) RecordArt(Modifier.size(58.dp), item.id.hashCode())
+                                else Thumb(model, Modifier.size(64.dp, 48.dp).clip(RoundedCornerShape(10.dp)))
                                 Column(Modifier.weight(1f)) {
-                                    Text(item.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    val known = item.bytes?.let(::sizeLabel)
-                                    val previewInfo = item.detail?.split(" · ")
-                                    val estimate = previewInfo?.lastOrNull()?.takeIf { it != "Size unavailable" }?.let {
-                                        if (it.startsWith("~")) "Est. ${it.removePrefix("~")}" else "$it expected"
+                                    Text(item.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        SourceMark(source)
+                                        duration?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                        if (item.origin == MediaOrigin.IMPORTED.name) Text("Imported", style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
-                                    Text(listOfNotNull(source.label, dimensions ?: previewInfo?.firstOrNull()?.takeIf {
-                                        it.endsWith("p") || " × " in it
-                                    }, duration, known ?: estimate?.takeIf { item.active }).joinToString(" · "),
-                                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     if (!canOpen || item.active) Text(stateLabel, style = MaterialTheme.typography.labelMedium,
                                         color = if (item.state == "FAILED" || !available) MaterialTheme.colorScheme.error
                                             else MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -245,8 +275,10 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                 IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "Download actions") }
                                 DropdownMenu(menu, onDismissRequest = { menu = false }) {
                                     fun execute(action: () -> Unit): () -> Unit = { menu = false; action() }
-                                    if (item.active) DropdownMenuItem(text = { Text("Cancel") },
-                                        onClick = execute { act { app.downloads.cancel(item) } })
+                                    if (item.active) {
+                                        DropdownMenuItem(text = { Text("Pause") }, onClick = execute { act { app.downloads.pause(item) } })
+                                        DropdownMenuItem(text = { Text("Cancel") }, onClick = execute { act { app.downloads.cancel(item) } })
+                                    }
                                     else {
                                         if (uri != null && available) {
                                             DropdownMenuItem(text = { Text(if (video || audio) "Play" else "Open") }, onClick = execute(::open))
@@ -256,26 +288,26 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                                 onClick = execute { showMedia(context, uri, mime, false, chooseApp = true) })
                                             DropdownMenuItem(text = { Text("Share") }, onClick = execute { showMedia(context, uri, mime, true) })
                                             if (source != Source.IMPORTED) {
-                                                if (settings.folderOrganization)
-                                                    DropdownMenuItem(text = { Text("Rename file") }, onClick = execute { renameFile = item })
+                                                DropdownMenuItem(text = { Text("Rename file") }, onClick = execute { renameFile = item })
                                                 DropdownMenuItem(text = { Text("Delete file") }, onClick = execute { confirmation = item })
                                             }
                                         }
-                                        if (item.state in setOf("FAILED", "CANCELLED") && MediaLink.parse(item.url) != null) {
+                                        if (item.state in setOf("FAILED", "CANCELLED", "PAUSED") && MediaLink.parse(item.url) != null) {
                                             if (item.state == "FAILED") DropdownMenuItem(text = { Text("Copy diagnostic report") },
                                                 onClick = execute {
                                                     val info = context.packageManager.getPackageInfo(context.packageName, 0)
                                                     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(
                                                         ClipData.newPlainText("SAOREO diagnostic",
                                                             "SAOREO ${info.versionName} · Android ${android.os.Build.VERSION.SDK_INT} · yt-dlp ${Extractor.ENGINE_VERSION}\n" +
-                                                                (item.error ?: "Transfer failed")))
+                                                                (item.error ?: "Transfer failed") + "\n" + app.youtubeDiagnostics.export()))
                                                 })
-                                            DropdownMenuItem(text = { Text("Retry") },
+                                            DropdownMenuItem(text = { Text(if (item.state == "PAUSED") "Resume" else "Retry") },
                                                 onClick = execute { act { app.downloads.retry(item, settings) } })
                                         }
                                         if (settings.folderOrganization)
                                             DropdownMenuItem(text = { Text("Move to folder") }, onClick = execute { move = item })
-                                        DropdownMenuItem(text = { Text("Remove from history") },
+                                        DropdownMenuItem(text = { Text("File details") }, onClick = execute { fileDetails = item })
+                                        DropdownMenuItem(text = { Text(if (libraryVideos) "Remove from library" else "Remove from history") },
                                             onClick = execute { act { app.downloads.remove(item, false) } })
                                     }
                                 }
@@ -288,15 +320,12 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                     }
                 }
             }
-        }
+                }
     }
     if (settings.folderOrganization) {
         if (addFolder) NameDialog("New folder", close = { addFolder = false }, save = { app.collections.newFolder(folder, it) })
         renameFolder?.let { item -> NameDialog("Rename folder", item.name, { renameFolder = null }) {
             app.collections.renameFolder(item.id, it)
-        } }
-        renameFile?.let { item -> NameDialog("Rename file", item.title, { renameFile = null }) {
-            app.collections.renameFile(item, it)
         } }
         moveFolder?.let { item ->
             DestinationDialog(app, item.parent.takeIf(String::isNotEmpty), { moveFolder = null },
@@ -304,6 +333,18 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
         }
         move?.let { item -> DestinationDialog(app, item.folder, { move = null }) { target -> act { app.collections.move(item, target) } } }
     }
+    renameFile?.let { item -> NameDialog("Rename file", item.title, { renameFile = null }) { app.collections.renameFile(item, it) } }
+    fileDetails?.let { item -> AlertDialog(onDismissRequest = { fileDetails = null }, title = { Text("File details") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(item.title)
+            Text("Origin: ${item.origin.lowercase().replaceFirstChar { it.uppercase() }}")
+            Text("Type: ${item.mime ?: "Not available yet"}")
+            Text("Size: ${item.bytes?.let(::sizeLabel) ?: "Not available yet"}")
+            item.galleryUri?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            val storage = android.os.StatFs(app.filesDir.absolutePath)
+            Text("Available device storage: ${sizeLabel(storage.availableBytes)}")
+        }
+    }, confirmButton = { TextButton({ fileDetails = null }) { Text("Done") } }) }
     convertUri?.let { value ->
         ConversionSheet(app, Uri.parse(value), convertTitle, imported) { convertUri = null }
     }

@@ -26,4 +26,22 @@ class YoutubeTransferTest {
         assertEquals("YouTube · Downloading · HTTP 403", report)
         assertFalse(report.contains("secret"))
     }
+
+    @Test fun staleConnectionsAndMissingFormatsTryAnotherClient() {
+        for (message in listOf("HTTP Error 403: Forbidden", "Requested format is not available", "No video formats found",
+            "Signature solving failed", "n challenge solving failed")) {
+            assertTrue(message, shouldRetryYoutubeClient(java.io.IOException(message)))
+        }
+        assertNull(youtubeClients.first())
+        assertEquals(3, youtubeClients.size)
+    }
+
+    @Test fun restrictionsRateLimitsAndLocalErrorsDoNotMultiplyRequests() {
+        for (message in listOf("HTTP Error 429", "Private video", "Sign in to confirm your age", "This video is DRM protected",
+            "Permission denied", "No space left on device", "Connection timed out", "403: sign in required")) {
+            assertFalse(message, shouldRetryYoutubeClient(java.io.IOException(message)))
+        }
+        assertFalse(shouldRetryYoutubeClient(java.util.concurrent.CancellationException("403")))
+        assertFalse(shouldRetryYoutubeClient(InterruptedException("403")))
+    }
 }

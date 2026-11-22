@@ -16,7 +16,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.shape.CircleShape
@@ -96,15 +100,20 @@ class LibraryAudioService : MediaSessionService() {
         queue = SavedMusicQueue(this)
         queue.restore(player)
         app.audioControl.register(player)
+        var countedUri: String? = null
         player.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) { countedUri = null }
             override fun onEvents(player: Player, events: Player.Events) {
                 if (events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_POSITION_DISCONTINUITY,
                         Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_REPEAT_MODE_CHANGED,
-                        Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED)) queue.save(player)
+                        Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED, Player.EVENT_PLAYBACK_PARAMETERS_CHANGED)) queue.save(player)
                 if ((events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION) || events.contains(Player.EVENT_IS_PLAYING_CHANGED)) &&
                     player.isPlaying) {
                     val uri = player.currentMediaItem?.mediaId ?: return
-                    scope.launch { app.dao.byUri(uri)?.let { app.collections.trackPlayed(it.id) } }
+                    if (countedUri != uri) {
+                        countedUri = uri
+                        scope.launch { app.dao.byUri(uri)?.let { app.collections.trackPlayed(it.id) } }
+                    }
                 }
             }
         })
@@ -123,6 +132,12 @@ class LibraryAudioService : MediaSessionService() {
         val open = PendingIntent.getActivity(this, 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         session = MediaSession.Builder(this, player).setSessionActivity(open)
             .setCallback(object : MediaSession.Callback {
+                override fun onPlaybackResumption(session: MediaSession, controller: MediaSession.ControllerInfo):
+                    com.google.common.util.concurrent.ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                    val items = (0 until player.mediaItemCount).map(player::getMediaItemAt)
+                    return com.google.common.util.concurrent.Futures.immediateFuture(MediaSession.MediaItemsWithStartPosition(
+                        items, player.currentMediaItemIndex.coerceAtLeast(0), player.currentPosition.coerceAtLeast(0)))
+                }
                 override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
                     if (controller.packageName == packageName) return super.onConnect(session, controller)
                     if (!controller.isTrusted && !session.isMediaNotificationController(controller)) {
@@ -215,6 +230,7 @@ class LibraryPlayerActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun VideoPlayback(app: SaoreoApp, first: Download) {
         val preferences = remember { getSharedPreferences("video_positions", Context.MODE_PRIVATE) }
@@ -379,17 +395,26 @@ class LibraryPlayerActivity : ComponentActivity() {
                     if (!unsupportedVideo) TextButton(onClick = { player.prepare(); player.play() }) { Text("Retry") }
                 }
             }
-            if (controls || error != null) {
+            androidx.compose.animation.AnimatedVisibility(controls || error != null, modifier = Modifier.matchParentSize(),
+                enter = fadeIn(tween(180)), exit = fadeOut(tween(140))) {
+                CompositionLocalProvider(LocalContentColor provides Color.White, LocalPickerVisibility provides { open -> speed = open }) {
+                Box(Modifier.fillMaxSize()) {
                 Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .88f), Color.Transparent)))
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 54.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { finish() }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to Downloads") }
-                        Text(item.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.titleMedium)
+                        Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                            Text("SAOREO PLAYER", color = Lime, style = MaterialTheme.typography.labelSmall)
+                            Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                        }
                         Box {
                             IconButton(onClick = { overflow = true }) { Icon(Icons.Outlined.MoreVert, "Video actions") }
-                            DropdownMenu(overflow, onDismissRequest = { overflow = false }) {
+                            if (overflow) ModalBottomSheet(onDismissRequest = { overflow = false },
+                                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+                                Column(Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()).navigationBarsPadding().padding(16.dp)) {
+                                    Text("Video actions", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(12.dp))
+
                                 DropdownMenuItem(text = { Text("Share") }, onClick = {
                                     overflow = false; showMedia(this@LibraryPlayerActivity, uri, item.mime ?: "video/mp4", true)
                                 })
@@ -415,6 +440,7 @@ class LibraryPlayerActivity : ComponentActivity() {
                                     DropdownMenuItem(text = { Text("Audio track") }, onClick = { overflow = false; audioTracks = true })
                                 }
                                 DropdownMenuItem(text = { Text("Subtitles") }, onClick = { overflow = false; captions = true })
+                                                            }
                             }
                         }
                     }
@@ -423,7 +449,7 @@ class LibraryPlayerActivity : ComponentActivity() {
                     Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(22.dp)) {
                         MediaIcon(R.drawable.ic_media_prev, "Previous video", enabled = index > 0) { move(-1) }
-                        IconButton(modifier = Modifier.size(74.dp).background(Color.Black.copy(alpha = .58f), CircleShape),
+                        IconButton(modifier = Modifier.size(76.dp).background(Lime, RoundedCornerShape(26.dp)),
                             onClick = {
                                 if (player.playWhenReady && !reading.ended) player.pause()
                                 else { if (reading.ended) player.seekTo(0); player.play() }
@@ -431,7 +457,7 @@ class LibraryPlayerActivity : ComponentActivity() {
                             }) {
                             val paused = !player.playWhenReady || reading.ended
                             Icon(painterResource(if (paused) R.drawable.ic_media_play else R.drawable.ic_media_pause),
-                                if (paused) "Play" else "Pause", Modifier.size(38.dp), tint = Color.White)
+                                if (paused) "Play" else "Pause", Modifier.size(36.dp), tint = Ink)
                         }
                         MediaIcon(R.drawable.ic_media_next, "Next video", enabled = index >= 0 && index < list.lastIndex) { move(1) }
                     }
@@ -440,32 +466,23 @@ class LibraryPlayerActivity : ComponentActivity() {
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .82f))))
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                     .padding(horizontal = 14.dp, vertical = 4.dp)) {
-                    PlaybackSeek(reading, player) { interacted++ }
+                    CompactSeek(reading, player, darkSurface = true) { interacted++ }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically) {
-                        Box {
-                            MediaIcon(R.drawable.ic_media_speed, "Playback speed ${reading.speed}×") { speed = true }
-                            DropdownMenu(speed, onDismissRequest = { speed = false }) {
-                                listOf(.5f, .75f, 1f, 1.25f, 1.5f, 2f).forEach { value ->
-                                    DropdownMenuItem(text = { Text(if (value == reading.speed) "$value×  ✓" else "$value×") },
-                                        onClick = { player.setPlaybackSpeed(value); speed = false; interacted++ })
-                                }
+                        MaterialTheme(colorScheme = darkColorScheme(primary = Lime, onPrimary = Ink,
+                            surface = Ink, onSurface = Color.White, surfaceContainer = Ink)) {
+                            ChoiceMenu("${reading.speed}\u00d7", listOf(.5f, .75f, 1f, 1.25f, 1.5f, 2f), { "${it}\u00d7" }) {
+                                player.setPlaybackSpeed(it); interacted++
                             }
-                        }
-                        Box {
-                            MediaIcon(R.drawable.ic_media_aspect, "Aspect ratio · $display") { aspect = true }
-                            DropdownMenu(aspect, { aspect = false }) {
-                                listOf("Fit", "Fill", "Crop").forEach { mode ->
-                                    DropdownMenuItem(text = { Text(if (display == mode) "$mode  ✓" else mode) },
-                                        onClick = { display = mode; aspect = false; interacted++ })
-                                }
-                            }
+                            ChoiceMenu(display, listOf("Fit", "Fill", "Crop"), { it }) { display = it; interacted++ }
                         }
                         MediaIcon(if (fullscreen) R.drawable.ic_media_exit else R.drawable.ic_media_full,
                             if (fullscreen) "Exit fullscreen" else "Landscape fullscreen") {
                             setFullscreen(!fullscreen); interacted++
                         }
                     }
+                }
+                }
                 }
             }
         }
@@ -492,7 +509,7 @@ class LibraryPlayerActivity : ComponentActivity() {
 @Composable
 internal fun MediaIcon(resource: Int, label: String, enabled: Boolean = true, onClick: () -> Unit) {
     IconButton(onClick = onClick, enabled = enabled) {
-        Icon(painterResource(resource), label, tint = Color.White.copy(alpha = if (enabled) 1f else .35f))
+        Icon(painterResource(resource), label, tint = if (enabled) Lime else Color.White.copy(alpha = .3f))
     }
 }
 

@@ -6,7 +6,7 @@ import java.util.Locale
 enum class Source(val label: String) {
     YOUTUBE("YouTube"), INSTAGRAM("Instagram"), TIKTOK("TikTok"),
     X("X"), SNAPCHAT("Snapchat"), PINTEREST("Pinterest"),
-    WHATSAPP("WhatsApp"), BUSINESS("WhatsApp Business"), SHARED("Shared file"), IMPORTED("Imported audio"), CONVERTED("Conversion")
+    WHATSAPP("WhatsApp"), BUSINESS("WhatsApp Business"), SHARED("Shared file"), IMPORTED("Imported"), CONVERTED("Conversion")
 }
 
 data class MediaLink(val url: String, val source: Source) {
@@ -191,7 +191,7 @@ fun mediaFailure(detail: String?): String {
     return when {
         "no space left" in text || "enospc" in text -> "The device is out of storage."
         "permission denied" in text -> "Android denied access to the file."
-        "403" in text -> "The media server refused the request (HTTP 403). Try another public link or retry later."
+        "403" in text -> "The source refused the available media connections (403). Try this link on another network, or retry later."
         "requested format" in text || "no downloadable public formats" in text -> "The source has no supported download format. Try another quality or link."
         "429" in text -> "The platform is limiting requests. Try again later."
         "drm" in text || "private" in text || "sign in" in text || "login" in text ->
@@ -203,4 +203,19 @@ fun mediaFailure(detail: String?): String {
         "merge" in text || "ffmpeg" in text -> "The audio and video could not be combined."
         else -> "Couldn’t retrieve this media from the source."
     }
+}
+
+/** yt-dlp may wrap Instagram carousel media in a playlist even when only one item is selected. */
+internal fun mediaMetadataObject(root: org.json.JSONObject, depth: Int = 0): org.json.JSONObject {
+    if (depth > 4 || root.optJSONArray("formats")?.length()?.let { it > 0 } == true) return root
+    val entries = root.optJSONArray("entries") ?: return root
+    for (index in 0 until minOf(entries.length(), 20)) {
+        val item = entries.optJSONObject(index) ?: continue
+        val selected = mediaMetadataObject(item, depth + 1)
+        if ((selected.optJSONArray("formats")?.length() ?: 0) > 0) {
+            if (selected.optString("title").isBlank()) selected.put("title", root.optString("title", "Instagram video"))
+            return selected
+        }
+    }
+    return root
 }

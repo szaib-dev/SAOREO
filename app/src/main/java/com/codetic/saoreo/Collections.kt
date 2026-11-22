@@ -6,6 +6,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.ForeignKey
@@ -37,7 +38,8 @@ internal data class PlaylistTrack(val playlist: String, val song: String, val ad
 @Entity(tableName = "song_state", foreignKeys = [
     ForeignKey(entity = Download::class, parentColumns = ["id"], childColumns = ["song"], onDelete = ForeignKey.CASCADE),
 ])
-internal data class SongState(@PrimaryKey val song: String, val liked: Boolean = false, val played: Long = 0)
+internal data class SongState(@PrimaryKey val song: String, val liked: Boolean = false, val played: Long = 0,
+    @ColumnInfo(defaultValue = "0") val playCount: Int = 0)
 
 @Dao
 internal interface CollectionDao {
@@ -57,7 +59,7 @@ internal interface CollectionDao {
     @Query("SELECT * FROM song_state") fun songStates(): Flow<List<SongState>>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun init(state: SongState)
     @Query("UPDATE song_state SET liked = NOT liked WHERE song = :song") suspend fun toggleLike(song: String)
-    @Query("UPDATE song_state SET played = :now WHERE song = :song") suspend fun played(song: String, now: Long)
+    @Query("UPDATE song_state SET played = :now, playCount = playCount + 1 WHERE song = :song") suspend fun played(song: String, now: Long)
 }
 
 internal class Collections(private val app: SaoreoApp) {
@@ -129,24 +131,30 @@ internal class Collections(private val app: SaoreoApp) {
         }
     }
 
-    suspend fun importAudio(uri: Uri): Download = withContext(Dispatchers.IO) {
+    suspend fun importAudio(uri: Uri): Download = importMedia(uri, false)
+
+    suspend fun importVideo(uri: Uri): Download = importMedia(uri, true)
+
+    private suspend fun importMedia(uri: Uri, video: Boolean): Download = withContext(Dispatchers.IO) {
         require(uri.scheme == "content")
         val resolver = app.contentResolver
         val original = resolver.getType(uri)
         val display = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
             ?.use { if (it.moveToFirst()) it.getString(0) to it.getLong(1).takeIf { size -> size > 0 } else null }
         val extension = display?.first?.substringAfterLast('.')?.lowercase()
-        val mime = original?.takeIf { it.startsWith("audio/") }
-            ?: extension?.let { mimeFor(it, audio = true) }?.takeIf { it.startsWith("audio/") }
-            ?: throw IOException("Choose an audio file.")
+        val kind = if (video) "video/" else "audio/"
+        val mime = original?.takeIf { it.startsWith(kind) }
+            ?: extension?.let { mimeFor(it, audio = !video) }?.takeIf { it.startsWith(kind) }
+            ?: throw IOException("Choose a supported ${if (video) "video" else "audio"} file.")
         MediaMetadataRetriever().use {
             it.setDataSource(app, uri)
-            if (it.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) != "yes" ||
+            if (if (video) it.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes" else
+                it.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) != "yes" ||
                 it.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes") {
                 throw IOException("This file does not contain supported audio.")
             }
         }
-        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (uri.authority != MediaStore.AUTHORITY) resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         app.database.runInTransactionAudio(app.dao, uri.toString(), mime, display)
     }
 }

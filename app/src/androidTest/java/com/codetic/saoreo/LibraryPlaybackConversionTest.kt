@@ -78,7 +78,7 @@ class LibraryPlaybackConversionTest {
                         assertTrue(duration in 4_850..5_250)
                         assertTrue(bitrate in 185_000..200_000)
                     }
-                    val saved = app.dao.observe().first().single { it.galleryUri == output.toString() }
+                    val saved = requireNotNull(app.dao.byUri(output.toString()))
                     assertEquals(JobState.COMPLETE.name, saved.state)
                     assertEquals("audio/mpeg", saved.mime)
                     assertArrayEquals(original, app.contentResolver.openInputStream(input.uri)!!.use { it.readBytes() })
@@ -144,7 +144,7 @@ class LibraryPlaybackConversionTest {
             block(inspectVideo(app, source, title, imported = true), bytes)
         } finally {
             source?.let { app.contentResolver.delete(it, null, null) }
-            app.dao.observe().first().filter { it.source == Source.CONVERTED.name && it.title == title }
+            app.dao.audio().first().filter { it.source == Source.CONVERTED.name && it.title == title }
                 .forEach { app.dao.remove(it.id) }
             file.delete()
         }
@@ -156,6 +156,6 @@ class LibraryPlaybackConversionTest {
 
     private suspend fun removeOutput(output: Uri) {
         app.contentResolver.delete(output, null, null)
-        app.dao.observe().first().find { it.galleryUri == output.toString() }?.let { app.dao.remove(it.id) }
+        app.dao.byUri(output.toString())?.let { app.dao.remove(it.id) }
     }
 }

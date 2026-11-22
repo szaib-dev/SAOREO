@@ -55,12 +55,12 @@ internal data class ConversionInput(
 )
 
 internal suspend fun inspectVideo(
-    context: Context, uri: Uri, title: String?, imported: Boolean,
+    context: Context, uri: Uri, title: String?, imported: Boolean, audioInput: Boolean = false,
 ): ConversionInput = withContext(Dispatchers.IO) {
     if (uri.scheme != "content") throw IOException("Choose a local video file.")
     val resolver = context.contentResolver
     var size: Long? = null
-    var name = "Video"
+    var name = if (audioInput) "Audio" else "Video"
     resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
         ?.use { cursor ->
             if (cursor.moveToFirst()) {
@@ -70,7 +70,7 @@ internal suspend fun inspectVideo(
                 if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn).takeIf { it >= 0 }
             }
         }
-    if (imported && resolver.getType(uri) != "video/mp4" && !name.endsWith(".mp4", true)) {
+    if (!audioInput && imported && resolver.getType(uri) != "video/mp4" && !name.endsWith(".mp4", true)) {
         throw IOException("Select an MP4 video.")
     }
     if (!isReadable(context, uri)) throw FileNotFoundException()
@@ -105,7 +105,7 @@ internal class ConversionState(private val app: SaoreoApp) {
         directory.deleteRecursively()
     }
 
-    fun start(request: ConversionInput, rate: Int): Boolean {
+    fun start(request: ConversionInput, rate: Int, videoOutput: Boolean = false): Boolean {
         if (status.value?.active == true || rate !in mp3Rates) return false
         val initial = ConversionStatus(request.title, "Preparing video", SystemClock.elapsedRealtime())
         status.value = initial
@@ -114,7 +114,7 @@ internal class ConversionState(private val app: SaoreoApp) {
                 .setAction(ConversionService.START).setData(request.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 .putExtra("title", request.title).putExtra("duration", request.durationMs)
                 .putExtra("size", request.bytes ?: -1).putExtra("rate", rate)
-                .putExtra("imported", request.imported))
+                .putExtra("imported", request.imported).putExtra("videoOutput", videoOutput))
             true
         }.getOrElse {
             status.value = null
@@ -184,14 +184,18 @@ class ConversionService : Service() {
         // Even an immediate cancel must run the cleanup and publish its final state.
         job = scope.launch(start = CoroutineStart.ATOMIC) {
             val size = intent.getLongExtra("size", -1).takeIf { it >= 0 }
-            convert(uri, rate, initial, intent.getLongExtra("duration", 0), size, intent.getBooleanExtra("imported", false))
+            convert(uri, rate, initial, intent.getLongExtra("duration", 0), size, intent.getBooleanExtra("imported", false), intent.getBooleanExtra("videoOutput", false))
         }
         return START_NOT_STICKY
     }
 
-    private suspend fun convert(uri: Uri, rate: Int, initial: ConversionStatus, duration: Long, size: Long?, imported: Boolean) {
+    private suspend fun convert(uri: Uri, rate: Int, initial: ConversionStatus, duration: Long, size: Long?, imported: Boolean, videoOutput: Boolean) {
+        val extension = if (videoOutput) "mp4" else "mp3"
+        val mime = if (videoOutput) "video/mp4" else "audio/mpeg"
+        val location = if (videoOutput) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_MUSIC
+        val format = extension.uppercase(java.util.Locale.ROOT)
         var record = Download(UUID.randomUUID().toString(), "", Source.CONVERTED.name, initial.title,
-            state = "CONVERTING", mime = "audio/mpeg", detail = "$rate kbps")
+            state = "CONVERTING", mime = mime, detail = if (videoOutput) "Still image video" else "$rate kbps")
         var inserted = false
         val folder = File(state.directory, record.id)
         var completed: Uri? = null
@@ -211,7 +215,7 @@ class ConversionService : Service() {
             inserted = true
             if (!folder.mkdirs()) throw IOException("Couldn’t create temporary storage.")
             val input = File(folder, "input")
-            val output = File(folder, "audio.mp3")
+            val output = File(folder, "output.$extension")
             val reserve = 8L * 1024 * 1024
             val outputEstimate = estimatedMp3Bytes(duration, rate) ?: 0L
             if (size != null && StatFs(folder.path).availableBytes - reserve - outputEstimate < size) {
@@ -224,7 +228,7 @@ class ConversionService : Service() {
                         copyConversionData(source, sink) { bytes ->
                             val now = SystemClock.elapsedRealtime()
                             if (now - last >= 300) {
-                                progress("Reading video", size?.takeIf { it > 0 }
+                                progress("Reading input", size?.takeIf { it > 0 }
                                     ?.let { (100.0 * bytes / it).toInt().coerceIn(0, 99) })
                                 last = now
                             }
@@ -232,17 +236,17 @@ class ConversionService : Service() {
                     }
                 }
             } ?: throw FileNotFoundException()
-            val actualDuration = if (imported || duration <= 0) {
+            val actualDuration = if (videoOutput || imported || duration <= 0) {
                 try {
                     MediaMetadataRetriever().use { reader ->
                         reader.setDataSource(input.path)
-                        if (reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes") {
+                        if (!videoOutput && reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes") {
                             throw IOException("The selected file does not contain a video track.")
                         }
                         if (reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) != "yes") {
-                            throw IOException("This video has no audio track.")
+                            throw IOException("This file has no audio track.")
                         }
-                        if (imported && reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) != "video/mp4") {
+                        if (!videoOutput && imported && reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) != "video/mp4") {
                             throw IOException("The selected file is not an MP4 video.")
                         }
                         reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: duration
@@ -250,11 +254,25 @@ class ConversionService : Service() {
                 } catch (_: RuntimeException) { throw IOException("This video is corrupt or uses an unsupported format.") }
             } else duration
             currentCoroutineContext().ensureActive()
-            progress("Encoding MP3", 0)
-            val executable = File(applicationInfo.nativeLibraryDir, "libsaoreomp3.so")
+            progress("Encoding $format", 0)
+            if (videoOutput) app.extractor.initializeLocalEncoder()
+            val executable = File(applicationInfo.nativeLibraryDir, if (videoOutput) "libffmpeg.so" else "libsaoreomp3.so")
             if (!executable.canExecute()) throw IOException("The offline encoder is unavailable on this device.")
-            val process = ProcessBuilder(listOf(executable.path) + mp3Arguments(input.path, output.path, rate))
-                .redirectErrorStream(true).directory(folder).start()
+            val arguments = if (videoOutput) listOf(
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
+                "-protocol_whitelist", "file", "-format_whitelist", "mp3", "-i", input.path,
+                "-f", "lavfi", "-i", "color=c=0x19191e:s=640x360:r=10",
+                "-map", "1:v:0", "-map", "0:a:0", "-c:v", "libx264", "-preset", "ultrafast",
+                "-threads", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                "-shortest", "-movflags", "+faststart", "-n", output.path,
+            ) else mp3Arguments(input.path, output.path, rate)
+            val process = ProcessBuilder(listOf(executable.path) + arguments).apply {
+                if (videoOutput) {
+                    val packages = File(noBackupFilesDir, "youtubedl-android/packages")
+                    environment()["LD_LIBRARY_PATH"] = listOf("python", "ffmpeg")
+                        .joinToString(":") { File(packages, "$it/usr/lib").absolutePath }
+                }
+            }.redirectErrorStream(true).directory(folder).start()
             encoder = process
             try {
                 currentCoroutineContext().ensureActive()
@@ -264,40 +282,41 @@ class ConversionService : Service() {
                         currentCoroutineContext().ensureActive()
                         if (line.contains("No space left", ignoreCase = true)) storageFailure = true
                         val micros = line.removePrefix("out_time_us=").takeIf { line.startsWith("out_time_us=") }?.toLongOrNull()
-                        if (micros != null) progress("Encoding MP3", actualDuration.takeIf { it > 0 }
+                        if (micros != null) progress("Encoding $format", actualDuration.takeIf { it > 0 }
                             ?.let { (micros / 10.0 / it).toInt().coerceIn(0, 99) })
                     }
                 }
                 currentCoroutineContext().ensureActive()
                 if (!process.waitFor(10, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                    if (storageFailure) throw IOException("There is not enough storage to save the MP3.")
-                    throw IOException("Couldn’t decode the video’s audio. The track may be missing, unsupported or damaged.")
+                    if (storageFailure) throw IOException("There is not enough storage to save the $format.")
+                    throw IOException("Couldn’t encode this file. Check that the audio track is playable.")
                 }
             } finally {
                 process.destroyForcibly()
                 encoder = null
             }
             input.delete()
-            validateMedia(output, "audio/mpeg")
-            progress("Saving MP3", 99)
+            verifyDownloadedMedia(output, mime, requireAudio = true)
+            progress("Saving $format", 99)
             val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "${safeName(initial.title)}.mp3")
-                put(MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "${safeName(initial.title)}.$extension")
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 put(MediaStore.Audio.Media.TITLE, initial.title)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/SAOREO/")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "$location/SAOREO/")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val collection = if (videoOutput) MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                else MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             // MediaStore assigns a unique path when the requested name already exists.
             val pending = withContext(NonCancellable) {
-                val entry = contentResolver.insert(collection, values) ?: throw IOException("Couldn’t create the MP3 in Music/SAOREO.")
+                val entry = contentResolver.insert(collection, values) ?: throw IOException("Couldn’t create the $format in $location/SAOREO.")
                 record = record.copy(galleryUri = entry.toString())
                 app.dao.update(record)
                 entry
             }
             contentResolver.openOutputStream(pending)?.buffered()?.use { sink ->
                 output.inputStream().use { source -> copyConversionData(source, sink) }
-            } ?: throw IOException("Couldn’t open the MP3 for writing.")
+            } ?: throw IOException("Couldn’t open the $format for writing.")
             currentCoroutineContext().ensureActive()
             withContext(NonCancellable) {
                 if (contentResolver.update(pending, ContentValues().apply {
@@ -305,7 +324,7 @@ class ConversionService : Service() {
                     }, null, null) != 1) throw IOException("Couldn’t publish the MP3.")
                 app.dao.update(record.copy(state = JobState.COMPLETE.name, bytes = output.length(), progress = 100))
                 completed = pending
-                stage = "Saved to Music/SAOREO"
+                stage = "Saved to $location/SAOREO"
             }
         } catch (_: CancellationException) {
             stage = if (deadline) "Android’s background time limit was reached." else "Conversion cancelled"
@@ -316,7 +335,7 @@ class ConversionService : Service() {
         } catch (failure: IOException) {
             val message = failure.message.orEmpty()
             stage = if (message.contains("ENOSPC") || message.contains("No space left"))
-                "There is not enough storage to save the MP3."
+                "There is not enough storage to save the $format."
             else if (message.startsWith("/") || message.contains(folder.path))
                 "Couldn’t read or save the conversion. Check available storage."
             else message.ifBlank { "Couldn’t read or save the media file." }

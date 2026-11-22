@@ -1750,12 +1750,12 @@
         {
             "type": "application",
             "name": "yt-dlp",
-            "version": "2026.10.26",
+            "version": "2026.11.20.232656",
             "bom-ref": "bundled:yt-dlp",
             "hashes": [
                 {
                     "alg": "SHA-256",
-                    "content": "e51e69e89489f199530f13d32a4342da3ddb2cf34842f364603a066db05afbf3"
+                    "content": "03f4e98b9d65d41c509235666439fb3d2f51fb0d10892a06c764ad9def770f0d"
                 }
             ]
         },

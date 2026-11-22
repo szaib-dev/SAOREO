@@ -8,11 +8,18 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -30,6 +37,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -50,6 +61,7 @@ import kotlinx.coroutines.withContext
 class MusicActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         val app = application as SaoreoApp
         val selected = intent.getStringExtra("song")
         val nowPlaying = intent.getBooleanExtra("playing", false)
@@ -79,7 +91,7 @@ private suspend fun songTags(app: SaoreoApp, uri: String): SongTags = withContex
 }
 
 @Composable
-private fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean) {
+internal fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean) {
     val art by produceState<android.graphics.Bitmap?>(null, uri, artwork, size) {
         value = if (uri == null || !artwork) null else withContext(Dispatchers.IO) {
             runCatching {
@@ -98,10 +110,8 @@ private fun Artwork(app: SaoreoApp, uri: String?, size: Int, artwork: Boolean) {
             }.getOrNull()
         }
     }
-    Box(Modifier.size(size.dp).clip(RoundedCornerShape(if (size > 80) 22.dp else 8.dp))
-        .background(MaterialTheme.colorScheme.secondaryContainer), contentAlignment = Alignment.Center) {
-        Icon(painterResource(R.drawable.ic_music_note), null, Modifier.size((size / 2).dp),
-            tint = MaterialTheme.colorScheme.onSecondaryContainer)
+    Box(Modifier.size(size.dp).clip(RoundedCornerShape(if (size > 80) 26.dp else 14.dp)), contentAlignment = Alignment.Center) {
+        RecordArt(Modifier.fillMaxSize(), uri?.hashCode() ?: 0)
         if (art != null) AsyncImage(art, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
     }
 }
@@ -127,33 +137,61 @@ internal fun rememberMusicController(app: SaoreoApp): Pair<MediaController?, Boo
 internal fun MusicMiniPlayer(app: SaoreoApp, player: MediaController?, onOpen: () -> Unit) {
     if (player == null) return
     var song by remember(player) { mutableStateOf(player.currentMediaItem) }
-    var playing by remember(player) { mutableStateOf(player.isPlaying) }
+    var lastSong by remember(player) { mutableStateOf(player.currentMediaItem) }
+    val reading = rememberPlayback(player)
+    var drag by remember { mutableFloatStateOf(0f) }
+    val scope = rememberCoroutineScope()
+    val offset by androidx.compose.animation.core.animateFloatAsState(drag, label = "Player dismissal")
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
                 song = player.currentMediaItem
-                playing = player.isPlaying
+                if (song != null) lastSong = song
             }
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
-    val track = song ?: return
-    Surface(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(12.dp)) {
-        Row(Modifier.clickable(onClick = onOpen).padding(horizontal = 8.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Artwork(app, track.mediaId, 38, true)
-            Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
-                Text(track.mediaMetadata.title?.toString() ?: "Audio", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                track.mediaMetadata.artist?.let { Text(it.toString(), maxLines = 1, style = MaterialTheme.typography.bodySmall) }
-            }
-            IconButton({
-                if (player.playWhenReady) player.pause()
-                else { player.prepare(); player.play() }
-            }) {
-                Icon(painterResource(if (playing) R.drawable.ic_media_pause else R.drawable.ic_media_play),
-                    if (playing) "Pause" else "Play")
+    AnimatedVisibility(song != null, enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically { it },
+        exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically { it }) {
+        val track = lastSong
+        Surface(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .offset { IntOffset(0, offset.roundToInt()) }.pointerInput(player) {
+                detectDragGesturesAfterLongPress(onDragStart = { drag = 0f }, onDragCancel = { drag = 0f }, onDragEnd = {
+                    if (drag > 64.dp.toPx()) { player.stop(); player.clearMediaItems(); app.audioControl.sleepUntil.value = 0 }
+                    drag = 0f
+                }) { change, amount -> change.consume(); drag = (drag + amount.y).coerceAtLeast(0f) }
+            }, color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(20.dp)) {
+            Column {
+                Row(Modifier.clickable(onClick = onOpen).padding(horizontal = 8.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Artwork(app, track?.mediaId, 36, true)
+                    Column(Modifier.weight(1f).padding(start = 10.dp, end = 2.dp)) {
+                        Text(track?.mediaMetadata?.title?.toString() ?: "Audio", maxLines = 1,
+                            style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PlayingBars(reading.playing)
+                            track?.mediaMetadata?.artist?.toString()?.takeIf { it.isNotBlank() }?.let {
+                                Text(it, maxLines = 1, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    IconButton({ player.seekToPrevious() }) { Icon(painterResource(R.drawable.ic_media_prev), "Previous track", Modifier.size(22.dp)) }
+                    FilledIconButton({
+                        if (player.playWhenReady) player.pause() else {
+                            if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
+                            player.prepare(); player.play()
+                        }
+                    }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = Lime, contentColor = Ink)) {
+                        Icon(painterResource(if (reading.playing) R.drawable.ic_media_pause else R.drawable.ic_media_play),
+                            if (reading.playing) "Pause" else "Play", Modifier.size(22.dp))
+                    }
+                    IconButton({ if (player.hasNextMediaItem()) player.seekToNextMediaItem() else player.seekToDefaultPosition(0) }) {
+                        Icon(painterResource(R.drawable.ic_media_next), "Next track", Modifier.size(22.dp))
+                    }
+                }
+                if (reading.duration > 0) LinearProgressIndicator(
+                    progress = { (reading.position.toFloat() / reading.duration).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(2.dp), color = Lime, trackColor = Color.Transparent)
             }
         }
     }
@@ -161,7 +199,8 @@ internal fun MusicMiniPlayer(app: SaoreoApp, player: MediaController?, onOpen: (
 
 @Composable
 internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boolean, close: () -> Unit,
-                          controller: MediaController? = null, embedded: Boolean = false) {
+                          controller: MediaController? = null, embedded: Boolean = false, initialSection: String = "Songs",
+                          onDownload: (() -> Unit)? = null) {
     val context = LocalContext.current
     val standalone = if (embedded) null else rememberMusicController(app)
     val connectionError = standalone?.second ?: false
@@ -171,14 +210,19 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     val membership by app.collections.dao.tracks().collectAsStateWithLifecycle(initialValue = emptyList())
     val states by app.collections.dao.songStates().collectAsStateWithLifecycle(initialValue = emptyList())
     val tags = remember { mutableStateMapOf<String, SongTags>() }
+    val embeddedTags = remember { mutableMapOf<String, SongTags>() }
     LaunchedEffect(songs) {
         for (song in songs) {
             val uri = song.galleryUri ?: continue
-            if (uri !in tags) tags[uri] = songTags(app, uri)
+            val original = embeddedTags.getOrPut(uri) { songTags(app, uri) }
+            tags[uri] = original.copy(title = song.localTitle ?: original.title,
+                artist = song.artist ?: original.artist, album = song.album ?: original.album)
+            if (song.duration == 0L && original.duration > 0) app.dao.setDuration(song.id, original.duration)
         }
     }
-    var section by rememberSaveable { mutableStateOf("Songs") }
+    var section by rememberSaveable { mutableStateOf(initialSection) }
     var collection by rememberSaveable { mutableStateOf<String?>(null) }
+    var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var full by rememberSaveable { mutableStateOf(launchPlayer || selected != null) }
     var consumed by rememberSaveable { mutableStateOf(false) }
@@ -187,6 +231,9 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     var songOptions by remember { mutableStateOf<Download?>(null) }
     var removeSong by remember { mutableStateOf<Download?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<Download?>(null) }
+    var sort by rememberSaveable { mutableStateOf("Date added") }
+    var addingTracks by rememberSaveable { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val player = controller ?: standalone?.first
@@ -215,11 +262,21 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         try { block() } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { error = "Couldn’t update the music library. Check file access and try again." }
     }
-    val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) perform {
+    val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) perform {
             importing = true
-            try { app.collections.importAudio(uri); toast(app, "Added to Music") }
-            finally { importing = false }
+            var added = 0
+            try {
+                for (uri in uris.distinct()) {
+                    try {
+                        val song = app.collections.importAudio(uri)
+                        if (section == "Playlists" && collection != null) app.collections.addSong(requireNotNull(collection), song)
+                        added++
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { error = "Some files could not be imported. Check file access and try again." }
+                }
+                toast(app, "$added song${if (added == 1) "" else "s"} added to Music")
+            } finally { importing = false }
         }
     }
     fun togglePlayback() {
@@ -264,8 +321,14 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         albumOrArtist && collection != null -> matching.filter { group(it) == collection }
         section == "Liked" -> matching.filter { stateBySong[it.id]?.liked == true }
         section == "Recent" -> matching.filter { (stateBySong[it.id]?.played ?: 0) > 0 }.sortedByDescending { stateBySong[it.id]?.played }
+        section == "Most played" -> matching.filter { (stateBySong[it.id]?.playCount ?: 0) > 0 }.sortedByDescending { stateBySong[it.id]?.playCount }
         else -> matching
-    }
+    }.let { rows -> if (section in listOf("Recent", "Most played")) rows else when (sort) {
+        "Title" -> rows.sortedBy { (tags[it.galleryUri]?.title ?: it.title).lowercase() }
+        "Artist" -> rows.sortedBy { tags[it.galleryUri]?.artist.orEmpty().lowercase() }
+        "Duration" -> rows.sortedByDescending { tags[it.galleryUri]?.duration ?: it.duration }
+        else -> if (playlist != null) rows else rows.sortedByDescending { it.created }
+    } }
     val current = songs.firstOrNull { it.galleryUri == currentUri }
     val trackTitle = current?.let { tags[it.galleryUri]?.title ?: it.title }
         ?: player?.mediaMetadata?.title?.toString() ?: "Audio"
@@ -275,13 +338,23 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     BackHandler(full || collection != null) {
         if (full) full = false else collection = null
     }
-    Column(Modifier.fillMaxSize().then(if (embedded) Modifier else Modifier.safeDrawingPadding()).padding(horizontal = 16.dp)) {
+    Column(Modifier.fillMaxSize().animateContentSize().background(if (full) Brush.verticalGradient(listOf(
+        MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.background), endY = 1300f)
+        else Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background)))
+        .then(if (embedded) Modifier else Modifier.safeDrawingPadding()).padding(horizontal = 24.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (!embedded || full || collection != null) IconButton({ if (full) full = false else if (collection != null) collection = null else close() }) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back")
             }
-            Text(if (full) "Now playing" else playlist?.name ?: collection ?: if (embedded) "Library" else "Music", Modifier.weight(1f),
-                style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                if (!embedded || full || collection != null) Text(if (full) "Now playing" else playlist?.name ?: collection ?: "Music",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!full) Text("${songs.size} songs", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (!full) IconButton({ searching = !searching; if (!searching) query = "" }) { Icon(Icons.Outlined.Search, "Search music") }
+            if (!full) ChoiceMenu(sort, listOf("Date added", "Title", "Duration", "Artist"), { it }) { sort = it }
             if (!full) IconButton({ import.launch(arrayOf("audio/*")) }, enabled = !importing) {
                 Icon(Icons.Outlined.Add, "Import audio")
             }
@@ -290,91 +363,49 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         if (connectionError) Text("Android could not connect to audio playback.", color = MaterialTheme.colorScheme.error)
         if (full && player != null && currentUri != null) {
-            var showQueue by rememberSaveable { mutableStateOf(false) }
-            val timer by app.audioControl.sleepUntil.collectAsStateWithLifecycle()
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                BoxWithConstraints { Artwork(app, currentUri, (maxWidth.value.toInt() - 24).coerceIn(110, 280), true) }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(trackTitle, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(trackSubtitle, style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    if (current != null) {
-                        val liked = stateBySong[current.id]?.liked == true
-                        IconButton({ perform { app.collections.toggleLike(current.id) } }) {
-                            Icon(if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                                if (liked) "Unlike" else "Like",
-                                tint = if (liked) MaterialTheme.colorScheme.primary else LocalContentColor.current)
-                        }
-                    }
-                }
-                reading.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                PlaybackSeek(reading, player)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton({ player.shuffleModeEnabled = !shuffle }) {
-                        Icon(painterResource(R.drawable.ic_music_shuffle), if (shuffle) "Disable shuffle" else "Enable shuffle",
-                            tint = if (shuffle) MaterialTheme.colorScheme.primary else LocalContentColor.current)
-                    }
-                    IconButton({ player.seekToPrevious() }) { Icon(painterResource(R.drawable.ic_media_prev), "Previous track") }
-                    FilledIconButton(::togglePlayback,
-                        Modifier.size(62.dp)) { Icon(painterResource(if (reading.playing) R.drawable.ic_media_pause else R.drawable.ic_media_play),
-                        if (reading.playing) "Pause" else "Play", Modifier.size(32.dp)) }
-                    IconButton({ player.seekToNextMediaItem() }, enabled = player.hasNextMediaItem()) {
-                        Icon(painterResource(R.drawable.ic_media_next), "Next track")
-                    }
-                    IconButton({ player.repeatMode = when (repeat) {
-                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                        else -> Player.REPEAT_MODE_OFF
-                    } }) {
-                        val label = when (repeat) { Player.REPEAT_MODE_ONE -> "Repeat one"; Player.REPEAT_MODE_ALL -> "Repeat all"; else -> "Repeat off" }
-                        Icon(painterResource(if (repeat == Player.REPEAT_MODE_ONE) R.drawable.ic_music_repeat_one else R.drawable.ic_music_repeat), label,
-                            tint = if (repeat != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else LocalContentColor.current)
-                    }
-                }
-                Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                    if (current != null) IconButton({ songOptions = current }) { Icon(Icons.Outlined.MoreVert, "Track options") }
-                    TextButton({ showQueue = !showQueue }) { Text("Queue") }
-                    ChoiceMenu(if (timer > 0) "Sleep timer on" else "Sleep timer", listOf(0, 15, 30, 45, 60),
-                        { if (it == 0) "Off" else "$it minutes" }) {
-                        app.audioControl.sleepUntil.value = if (it == 0) 0 else SystemClock.elapsedRealtime() + it * 60_000
-                    }
-                }
-                if (showQueue) currentQueue.value.forEachIndexed { index, item ->
-                    ListItem(headlineContent = { Text(item.mediaMetadata.title?.toString() ?: "Audio", maxLines = 1,
-                        overflow = TextOverflow.Ellipsis) },
-                        modifier = Modifier.clickable { player.seekToDefaultPosition(index); player.prepare(); player.play() },
-                        trailingContent = {
-                            Row {
-                                IconButton({ player.moveMediaItem(index, index - 1) }, enabled = index > 0) {
-                                    Icon(Icons.Outlined.KeyboardArrowUp, "Move earlier")
-                                }
-                                IconButton({ player.removeMediaItem(index) }) { Icon(Icons.Outlined.Close, "Remove from queue") }
-                            }
-                        })
-                }
-            }
+            NowPlaying(app, player, current, trackTitle, trackSubtitle, current?.let { stateBySong[it.id]?.liked } == true,
+                ::togglePlayback, { current?.let { perform { app.collections.toggleLike(it.id) } } }, onDismiss = { full = false; if (!embedded) close() })
         } else if (full && !connectionError && (player == null || selected != null && !consumed)) {
             if (player != null && loadedSongs != null) Text("This audio is no longer in the library.") else LinearProgressIndicator(Modifier.fillMaxWidth())
         } else {
-            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), label = { Text("Search your music") },
-                leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true)
+            AnimatedVisibility(searching) {
+                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    placeholder = { Text("Search songs, artists, albums") }, shape = RoundedCornerShape(18.dp),
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true)
+            }
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("Songs", "Playlists", "Artists", "Albums", "Liked", "Recent").forEach { tab ->
-                    FilterChip(section == tab, { section = tab; collection = null }, label = { Text(tab) })
+                listOf("Songs", "Playlists", "Artists", "Albums", "Liked", "Recent", "Most played").forEach { tab ->
+                    FilterChip(section == tab, { section = tab; collection = null }, label = { Text(tab) },
+                        shape = RoundedCornerShape(24.dp),
+                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Lime,
+                            selectedLabelColor = Ink))
                 }
             }
-            LazyColumn(Modifier.weight(1f)) {
+            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
                     section == "Playlists" && playlist == null -> {
-                        item { TextButton({ form = "" }) { Icon(Icons.Outlined.Add, null); Text("New playlist") } }
+                        item {
+                            OutlinedButton({ form = "" }, Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                                Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("Create a playlist")
+                            }
+                        }
+                        if (playlists.isEmpty()) item {
+                            EmptyState("Every mood needs a playlist.", "Create one, then add songs from your library.")
+                        }
                         items(playlists.filter { it.name.contains(query, true) }, key = { it.id }) { list ->
-                            ListItem(headlineContent = { Text(list.name) }, supportingContent = {
-                                Text("${membership.count { it.playlist == list.id }} tracks")
-                            }, leadingContent = { Icon(painterResource(R.drawable.ic_music_note), null) },
-                                modifier = Modifier.clickable { collection = list.id })
+                            Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer,
+                                modifier = Modifier.fillMaxWidth().clickable { collection = list.id }) {
+                                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    RecordArt(Modifier.size(70.dp), list.id.hashCode())
+                                    Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(list.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                        Text("${membership.count { it.playlist == list.id }} tracks", style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Icon(Icons.Outlined.PlayArrow, null)
+                                }
+                            }
                         }
                     }
                     albumOrArtist && collection == null -> items(matching.groupBy(::group).toSortedMap().entries.toList()) { (name, group) ->
@@ -384,13 +415,36 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                     }
                     else -> {
                         if (playlist != null) item {
-                            Row {
-                                TextButton({ form = playlist.name }) { Text("Rename") }
-                                TextButton({ deletePlaylist = playlist }) { Text("Delete") }
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                RecordArt(Modifier.size(180.dp), playlist.id.hashCode())
+                                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button({ visible.firstOrNull()?.let { player?.shuffleModeEnabled = false; play(visible, it) } },
+                                        enabled = visible.isNotEmpty() && player != null) {
+                                        Icon(Icons.Outlined.PlayArrow, null); Text("Play")
+                                    }
+                                    OutlinedButton({ addingTracks = true }) { Icon(Icons.Outlined.Add, null); Text("Add songs") }
+                                }
+                                Row {
+                                    TextButton({ form = playlist.name }) { Text("Rename") }
+                                    TextButton({ deletePlaylist = playlist }) { Text("Delete playlist") }
+                                }
+                            }
+                        } else if (visible.isNotEmpty()) item {
+                            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (section == "Liked") "Liked songs" else section, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                                TextButton({ player?.shuffleModeEnabled = true; play(visible, visible.random()) }, enabled = player != null) {
+                                    Icon(painterResource(R.drawable.ic_music_shuffle), null, Modifier.size(18.dp)); Text(" Shuffle")
+                                }
                             }
                         }
                         if (visible.isEmpty()) item {
-                            EmptyState("No songs here", if (section == "Songs") "Download audio, convert a video, or import an audio file." else null)
+                            EmptyState(if (query.isNotBlank()) "No matches" else if (playlist != null) "Make it your mix." else "Your next favorite belongs here.",
+                                if (query.isNotBlank()) "Try another title, artist, or album." else "Add songs from your device or save audio from a link.")
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                TextButton({ import.launch(arrayOf("audio/*")) }) { Text("Import songs") }
+                                if (onDownload != null) TextButton(onDownload) { Text("Download audio") }
+                            }
                         }
                         items(visible, key = { it.id }) { song ->
                             val metadata = tags[song.galleryUri]
@@ -399,31 +453,43 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                                 supportingContent = { Text(listOfNotNull(metadata?.artist ?: "Unknown artist",
                                     metadata?.duration?.takeIf { it > 0 }?.let(::playbackTime)).joinToString(" · "),
                                     maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                modifier = Modifier.clickable(enabled = player != null) { play(visible, song) },
-                                leadingContent = { Artwork(app, song.galleryUri, 44, true) },
+                                modifier = Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = player != null) { play(visible, song) },
+                                colors = ListItemDefaults.colors(containerColor = if (currentUri == song.galleryUri)
+                                    MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent),
+                                leadingContent = { Artwork(app, song.galleryUri, 54, true) },
                                 trailingContent = { IconButton({ songOptions = song }) { Icon(Icons.Outlined.MoreVert, "Track options") } },
                             )
                         }
                     }
                 }
             }
-            if (!embedded && player != null && currentUri != null) Surface(color = MaterialTheme.colorScheme.secondaryContainer,
-                shape = RoundedCornerShape(14.dp), modifier = Modifier.padding(vertical = 8.dp)) {
-                Row(Modifier.fillMaxWidth().clickable { full = true }.padding(horizontal = 8.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Artwork(app, currentUri, 44, true)
-                    Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
-                        Text(trackTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(trackSubtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall)
-                    }
-                    IconButton(::togglePlayback) {
-                        Icon(painterResource(if (reading.playing) R.drawable.ic_media_pause else R.drawable.ic_media_play),
-                            if (reading.playing) "Pause" else "Play")
-                    }
-                }
+            if (!embedded) MusicMiniPlayer(app, player) { full = true }
+        }
+    }
+    editing?.let { song ->
+        EditTrackDialog(song, tags[song.galleryUri]?.title ?: song.title, tags[song.galleryUri]?.artist, tags[song.galleryUri]?.album,
+            close = { editing = null }) { title, artist, album ->
+            app.dao.editTags(song.id, title, artist, album, song.lyrics)
+            if (player != null) for (index in 0 until player.mediaItemCount) {
+                val item = player.getMediaItemAt(index)
+                if (item.mediaId == song.galleryUri) player.replaceMediaItem(index, item.buildUpon().setMediaMetadata(
+                    item.mediaMetadata.buildUpon().setTitle(title).setArtist(artist).setAlbumTitle(album).build()).build())
             }
         }
     }
+    if (addingTracks && playlist != null) AlertDialog(onDismissRequest = { addingTracks = false },
+        title = { Text("Add songs to ${playlist.name}") }, text = {
+            LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                if (songs.isEmpty()) item { Text("Import songs into your library first.") }
+                items(songs, key = { it.id }) { song ->
+                    val included = membership.any { it.playlist == playlist.id && it.song == song.id }
+                    ListItem(headlineContent = { Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingContent = { Checkbox(included, { checked -> perform {
+                            if (checked) app.collections.addSong(playlist.id, song) else app.collections.dao.remove(playlist.id, song.id)
+                        } }) })
+                }
+            }
+        }, confirmButton = { TextButton({ addingTracks = false }) { Text("Done") } })
     form?.let { value -> NameDialog(if (value.isEmpty()) "New playlist" else "Rename playlist", value, { form = null }) {
         if (playlist != null && value.isNotEmpty()) app.collections.renamePlaylist(playlist.id, it) else app.collections.newPlaylist(it)
     } }
@@ -451,6 +517,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         AlertDialog(onDismissRequest = { songOptions = null }, title = { Text(song.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    TextButton({ editing = song; songOptions = null }) { Text("Edit track details") }
                     TextButton({ perform { app.collections.toggleLike(song.id) }; songOptions = null }) {
                         Text(if (stateBySong[song.id]?.liked == true) "Unlike" else "Like")
                     }
