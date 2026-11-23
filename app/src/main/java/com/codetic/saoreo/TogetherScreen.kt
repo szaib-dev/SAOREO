@@ -197,12 +197,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     var callViewOverride by rememberSaveable(room.room) { mutableStateOf<Boolean?>(null) }
     val callView = if (standalone) callViewOverride ?: true
         else calling.active && (callViewOverride ?: room.callFullscreen)
-    LaunchedEffect(room.room, room.callFullscreen) {
-        if (!standalone && room.callFullscreen) callViewOverride = null
-    }
     fun showStream() {
+        // Keep local navigation authoritative even if the earlier fullscreen request is still in flight.
         callViewOverride = false
-        if (room.callFullscreen) session.fullCall(false)
+        if (!standalone && room.connected) session.fullCall(false)
     }
     val fullscreen = fullMovie && !callView && room.media != null
     var expandedCamera by remember(fullscreen, callView) { mutableStateOf<String?>(null) }
