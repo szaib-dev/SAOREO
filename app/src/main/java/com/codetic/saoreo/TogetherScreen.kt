@@ -739,11 +739,6 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             )
             if (!callView && room.media == null) TogetherChatPreviewStack(chatPreviews,
                 Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp, vertical = 8.dp))
-            if (callView) IconButton({ showGames = true }, Modifier.align(Alignment.TopEnd)
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
-                .padding(top = 4.dp, end = 8.dp)) {
-                Icon(painterResource(R.drawable.ic_games_controller), "Open Games", tint = Color.White)
-            }
             if (partnerLeft) Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
                 Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {

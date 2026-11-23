@@ -22,8 +22,8 @@ android {
         manifestPlaceholders["saoreoLabel"] = "SAOREO"
         minSdk = 33
         targetSdk = 36
-        versionCode = 22
-        versionName = "2.10.2"
+        versionCode = 23
+        versionName = "2.10.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += packagedAbis }
         javaCompileOptions {

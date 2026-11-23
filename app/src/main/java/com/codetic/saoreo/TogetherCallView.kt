@@ -5,7 +5,6 @@ import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -22,7 +21,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -131,7 +129,6 @@ internal fun TogetherCallView(
                     Modifier.absoluteOffset(x = left + dragWidth * previewX, y = top + dragHeight * previewY)
                         .size(previewWidth, previewHeight)
                         .zIndex(1f)
-                        .border(1.dp, CallAccent.copy(alpha = if (showControls) .85f else .38f), RoundedCornerShape(20.dp))
                         .pointerInput(dragWidthPx, dragHeightPx) {
                             detectDragGestures { change, amount ->
                                 change.consume()
@@ -145,15 +142,7 @@ internal fun TogetherCallView(
                     fill = if (localMain) !calling.remoteSharing else !calling.sharing,
                     showLabel = false,
                     clipVideo = true,
-                ) {
-                    if (showControls) {
-                        Box(Modifier.align(Alignment.TopCenter)
-                            .clip(RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
-                            .background(CallGlass).padding(horizontal = 9.dp, vertical = 2.dp)) {
-                            Icon(painterResource(R.drawable.ic_call_options), null, Modifier.size(16.dp), tint = Color.White)
-                        }
-                    }
-                }
+                )
             }
             TogetherChatPreviewStack(chatPreviews,
                 Modifier.align(Alignment.TopCenter).zIndex(2f)
@@ -176,9 +165,6 @@ internal fun TogetherCallView(
                     Column(Modifier.weight(1f)) {
                         CallHeader(standaloneKind, calling, connectionNotice, calling.connectedAtMs)
                         if (calling.retryAvailable) TextButton(call::retryConnection) { Text("Retry connection") }
-                    }
-                    TextButton(openStream, enabled = calling.active, modifier = Modifier.padding(end = 38.dp)) {
-                        Text("Stream", color = Color.White)
                     }
                 }
                 val safeSides = if (chatOpen) WindowInsetsSides.Horizontal else WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom

@@ -75,6 +75,9 @@ class TogetherCallNavigationTest {
             val remoteTrack = host.callController.state.value.remoteVideo
             assertNotNull(remoteTrack)
             compose.onNodeWithContentDescription("Open full call").performClick()
+            compose.onNodeWithContentDescription("Open Games").assertDoesNotExist()
+            compose.onNodeWithText("Stream").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Call options").performClick()
             compose.onNodeWithText("Stream").performClick()
             compose.onNodeWithText("Choose what to watch").assertIsDisplayed()
             assertSame(remoteTrack, host.callController.state.value.remoteVideo)
@@ -117,10 +120,12 @@ class TogetherCallNavigationTest {
             val originalPosition = host.state.value.timeline.position
             repeat(3) { round ->
                 compose.onNodeWithContentDescription("Open full call").performClick()
-                compose.waitUntil(10_000) { compose.onAllNodesWithText("Stream").fetchSemanticsNodes().isNotEmpty() }
+                compose.onNodeWithContentDescription("Call options").assertIsDisplayed()
                 android.util.Log.i("SAOREO_TEST", "Leaving fullscreen round ${round + 1}")
-                if (round == 1) compose.onNodeWithText("Stream").performClick()
-                else instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+                if (round == 1) {
+                    compose.onNodeWithContentDescription("Call options").performClick()
+                    compose.onNodeWithText("Stream").performClick()
+                } else instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
                 try {
                     compose.waitUntil(10_000) {
                         compose.onAllNodesWithText("Together navigation movie").fetchSemanticsNodes().isNotEmpty()
