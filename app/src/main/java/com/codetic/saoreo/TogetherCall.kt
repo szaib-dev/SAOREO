@@ -16,7 +16,7 @@ import org.webrtc.audio.JavaAudioDeviceModule
 internal data class TogetherCallState(val active: Boolean = false, val mic: Boolean = false, val camera: Boolean = false,
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
     val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
-    val error: String? = null, val remoteBackground: Boolean = false)
+    val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
 internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false,
@@ -192,6 +192,10 @@ internal class TogetherCall(private val context: Context, private val session: T
         val s = mutable.value
         session.send("call", JSONObject().put("active", s.active).put("mic", s.mic).put("camera", s.camera || s.sharing))
     }
+    private fun announceScreenShare() {
+        sendAuthenticated(JSONObject().put("type", "screenShare").put("enabled", mutable.value.sharing))
+    }
+
     fun members(room: TogetherState) {
         if (closed) return
         val me = room.members.firstOrNull { it.id == room.member }
@@ -233,7 +237,10 @@ internal class TogetherCall(private val context: Context, private val session: T
             retryAuthentication.run()
         }
         if (authentication?.ready != true) return
-        if (remoteId != other.id || peer == null) createPeer(other.id)
+        if (remoteId != other.id || peer == null) {
+            createPeer(other.id)
+            announceScreenShare()
+        }
         if (me?.ordinal == 0 && !offerStarted) {
             offerStarted = true
             val run = peerGeneration
@@ -348,6 +355,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         val pc = peer ?: return
         val run = peerGeneration
         when (payload.optString("type")) {
+            "screenShare" -> mutable.value = mutable.value.copy(remoteSharing = payload.optBoolean("enabled"))
             "background" -> mutable.value = mutable.value.copy(remoteBackground = payload.optBoolean("enabled"))
             "offer", "answer" -> {
                 val type = SessionDescription.Type.fromCanonicalForm(payload.getString("type"))
@@ -420,7 +428,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         videoSender = null
         peerGeneration++; peer?.close(); peer?.dispose(); peer = null; remoteId = null
         hasRemoteDescription = false; offerStarted = false; candidates.clear()
-        mutable.value = mutable.value.copy(remoteVideo = null)
+        mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false)
     }
     fun stop() {
         stopScreenShare()
@@ -456,6 +464,7 @@ internal class TogetherCall(private val context: Context, private val session: T
             check(videoSender?.setTrack(track, false) != false)
             camera(false)
             mutable.value = mutable.value.copy(sharing = true, localVideo = track)
+            announceScreenShare()
             announce()
         } catch (error: RuntimeException) {
             stopScreenShare()
@@ -474,6 +483,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         screenTexture?.dispose(); screenTexture = null
         mutable.value = mutable.value.copy(sharing = false, localVideo = videoTrack)
         TogetherActiveCallService.projectionEnded(this)
+        announceScreenShare()
         announce()
     }
     private fun networkLost() {

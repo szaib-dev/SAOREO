@@ -51,10 +51,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -284,18 +282,12 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     val listState = rememberLazyListState()
     val keyboard = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val configuration = LocalConfiguration.current
-    var visibleMessage by remember(room.room) { mutableStateOf<TogetherChat?>(null) }
-    val showChatBanner = fullscreen || (!callView && tab == "Queue" && room.media != null)
-    LaunchedEffect(room.incomingChat?.id, showChatBanner) {
-        visibleMessage = null
-        val incoming = room.incomingChat ?: return@LaunchedEffect
-        val remaining = 5_000L - (session.serverNow() - incoming.time).coerceAtLeast(0)
-        if (remaining > 0 && showChatBanner) {
-            visibleMessage = incoming
-            delay(remaining)
-            visibleMessage = null
-        }
+    val showChatBanner = !partnerLeft && !showGames && when {
+        callView -> !callChat
+        fullscreen -> true
+        else -> tab == "Queue" && (calling.active || room.media != null)
     }
+    val chatPreviews = rememberCallChatPreviews(room, showChatBanner, session::serverNow)
     LaunchedEffect(room.chat.lastOrNull()?.id, keyboard, tab) {
         if (tab == "Chat" && (room.chat.isNotEmpty() || keyboard)) {
             delay(150); val count = listState.layoutInfo.totalItemsCount
@@ -474,9 +466,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                                         detectTapGestures(onDoubleTap = { expandedCamera = if (expandedCamera == id) null else id })
                                     }
                                 CameraTile(peer?.name ?: "Partner", calling.remoteVideo, peer?.camera == true && peer.online,
-                                    call, false, preview(peer?.id ?: "partner"), clipVideo = true)
+                                    call, false, preview(peer?.id ?: "partner"), fill = !calling.remoteSharing, clipVideo = true)
                                 CameraTile(if (calling.sharing) "Your screen" else "You", calling.localVideo,
-                                    calling.camera || calling.sharing, call, !calling.sharing, preview("self"), clipVideo = true)
+                                    calling.camera || calling.sharing, call, !calling.sharing, preview("self"),
+                                    fill = !calling.sharing, clipVideo = true)
                             }
                         }
                         val movieShape = RoundedCornerShape(16.dp)
@@ -505,23 +498,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                                         if (fullscreen) movieControls = !movieControls
                                     })
                             }
-                            visibleMessage?.takeIf { showChatBanner && !callChat && !partnerLeft }?.let { incoming ->
-                                Surface(
-                                    Modifier.align(Alignment.TopCenter)
-                                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                                        .widthIn(max = 440.dp).semantics { liveRegion = LiveRegionMode.Polite },
-                                    color = Color.Black.copy(alpha = .84f), contentColor = Color.White,
-                                    shape = RoundedCornerShape(14.dp),
-                                ) {
-                                    Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
-                                        Text(incoming.name, style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(incoming.text, style = MaterialTheme.typography.bodyMedium,
-                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
+                            if (!callView) TogetherChatPreviewStack(chatPreviews,
+                                Modifier.align(Alignment.TopCenter)
+                                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp))
                             if (fullscreen) {
                                 connectionNotice?.let { notice ->
                                     Surface(Modifier.align(Alignment.TopStart)
@@ -663,11 +643,11 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                         if (calling.active && (peer != null || calling.camera || calling.sharing)) item(key = "call-cameras") {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                val tile = Modifier.weight(1f).height(172.dp)
+                                val tile = Modifier.weight(1f).heightIn(max = 210.dp).aspectRatio(4f / 5f)
                                 CameraTile(peer?.name ?: "Partner", calling.remoteVideo, peer?.camera == true && peer.online,
-                                    call, false, tile, clipVideo = true)
+                                    call, false, tile, fill = !calling.remoteSharing, clipVideo = true)
                                 CameraTile(if (calling.sharing) "Your screen" else "You", calling.localVideo,
-                                    calling.camera || calling.sharing, call, !calling.sharing, tile, clipVideo = true)
+                                    calling.camera || calling.sharing, call, !calling.sharing, tile, fill = !calling.sharing, clipVideo = true)
                             }
                         }
                         if (room.queue.isEmpty()) item { Text("Pick what comes next.", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.bodySmall) }
@@ -733,8 +713,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                     }
                 }, Modifier.fillMaxSize(), standaloneKind = room.pairKind.takeIf { standalone },
                 toggleScreenShare = ::toggleScreenShare, showAudio = { showOutput = true },
-                connectionNotice = connectionNotice,
+                connectionNotice = connectionNotice, chatPreviews = chatPreviews,
             )
+            if (!callView && room.media == null) TogetherChatPreviewStack(chatPreviews,
+                Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp, vertical = 8.dp))
             if (callView) IconButton({ showGames = true }, Modifier.align(Alignment.TopEnd)
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
                 .padding(top = 4.dp, end = 8.dp)) {

@@ -45,6 +45,7 @@ internal fun TogetherCallView(
     standaloneKind: PairKind? = null,
     toggleScreenShare: () -> Unit = {}, showAudio: () -> Unit = {},
     connectionNotice: String? = null,
+    chatPreviews: List<TogetherChat> = emptyList(),
 ) {
     val peer = room.members.firstOrNull { it.id != room.member }
     val localVideoOn = calling.camera || calling.sharing
@@ -135,7 +136,7 @@ internal fun TogetherCallView(
                         .clickable(enabled = peerVideoOn, interactionSource = null, indication = null, onClickLabel = "Swap video views") {
                             localFocused = !localMain
                         },
-                    fill = !calling.sharing && !localMain,
+                    fill = if (localMain) !calling.remoteSharing else !calling.sharing,
                     showLabel = false,
                     clipVideo = true,
                 ) {
@@ -151,6 +152,10 @@ internal fun TogetherCallView(
                     }
                 }
             }
+            TogetherChatPreviewStack(chatPreviews,
+                Modifier.align(Alignment.TopCenter).zIndex(2f)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                    .padding(top = if (showControls) 64.dp else 12.dp, start = 16.dp, end = 16.dp))
             if (showControls) {
                 Row(Modifier.fillMaxWidth().align(Alignment.TopCenter)
                     .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .78f), Color.Transparent)))

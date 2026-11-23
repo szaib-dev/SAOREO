@@ -22,7 +22,7 @@ class RoundedCameraViewTest {
             .builder(instrumentation.targetContext).createInitializationOptions())
         val egl = EglBase.create()
         var preview: RoundedCameraView? = null
-        val frameBuffer = JavaI420Buffer.allocate(64, 64).apply {
+        val frameBuffer = JavaI420Buffer.allocate(36, 64).apply {
             dataY.apply { while (hasRemaining()) put(150.toByte()) }
             dataU.apply { while (hasRemaining()) put(44.toByte()) }
             dataV.apply { while (hasRemaining()) put(21.toByte()) }
@@ -43,6 +43,7 @@ class RoundedCameraViewTest {
                 }
                 var rendered = false
                 var clipped = false
+                var filled = false
                 for (attempt in 0 until 30) {
                     val points = IntArray(4)
                     scenario.onActivity {
@@ -60,9 +61,11 @@ class RoundedCameraViewTest {
                     try {
                         val center = bitmap.getPixel(points[0] + points[2], points[1] + points[3])
                         val corner = bitmap.getPixel(points[0] + 2, points[1] + 2)
+                        val edge = bitmap.getPixel(points[0] + 2, points[1] + points[3])
                         if (Color.green(center) > 140 && Color.green(center) > Color.red(center) + 70) {
                             rendered = true
                             clipped = Color.green(corner) < 35 && Color.red(corner) < 35
+                            filled = Color.green(edge) > 140 && Color.green(edge) > Color.red(edge) + 70
                             break
                         }
                     } finally {
@@ -71,6 +74,7 @@ class RoundedCameraViewTest {
                 }
                 assertTrue("The synthetic green camera frame was visible", rendered)
                 assertTrue("The corner outside the rounded outline stayed black", clipped)
+                assertTrue("The portrait camera frame filled the width", filled)
             } finally {
                 scenario.onActivity { preview?.release() }
                 frame.release()
