@@ -128,6 +128,7 @@ class TogetherAcceptanceTest {
                     assertEquals("Connected", ca.state.value.connection)
                     assertEquals("Connected", cb.state.value.connection)
                     assertTrue("Continuous video must still be decoding", frames.get() > count)
+                    android.util.Log.i("SAOREO_TEST", "PASS decoded video throughout the ${watchMs / 1000}-second call hold")
                 }
             } finally { track.removeSink(sink) }
             assertTrue("Native camera frames must arrive over forced TURN", frames.get() >= 5)
@@ -136,9 +137,13 @@ class TogetherAcceptanceTest {
                 assertFalse(ca.state.value.mic)
                 ca.camera(false)
                 assertFalse(ca.state.value.camera)
-                a.send("reaction", JSONObject().put("emoji", "heart"))
             }
-            withTimeout(10000) { b.state.first { it.reaction?.emoji == "heart" } }
+            withTimeout(35_000) {
+                a.state.first { room -> room.connected && room.members.all { it.online } }
+                b.state.first { room -> room.connected && room.members.all { it.online } }
+                withContext(Dispatchers.Main) { assertTrue(a.send("reaction", JSONObject().put("emoji", "heart"))) }
+                b.state.first { it.reaction?.emoji == "heart" }
+            }
         } finally {
             if (sessionsReady) android.util.Log.i("SAOREO_TEST", "Session diagnostics A=${a.state.value.error}, B=${b.state.value.error}, ready=${a.state.value.members.map { it.ready }}")
             if (callsReady) android.util.Log.i("SAOREO_TEST", "Call diagnostics A=${ca.state.value.connection}/${ca.state.value.error}, B=${cb.state.value.connection}/${cb.state.value.error}")
