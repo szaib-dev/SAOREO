@@ -88,12 +88,16 @@ class TogetherCallNavigationTest {
             repeat(3) { round ->
                 compose.onNodeWithContentDescription("Open full call").performClick()
                 compose.waitUntil(10_000) { compose.onAllNodesWithText("Stream").fetchSemanticsNodes().isNotEmpty() }
+                android.util.Log.i("SAOREO_TEST", "Leaving fullscreen round ${round + 1}")
                 if (round == 1) compose.onNodeWithText("Stream").performClick()
-                else android.os.ParcelFileDescriptor.AutoCloseInputStream(
-                    instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK")
-                ).use { it.readBytes() }
-                compose.waitUntil(10_000) {
-                    compose.onAllNodesWithText("Together navigation movie").fetchSemanticsNodes().isNotEmpty()
+                else instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+                try {
+                    compose.waitUntil(10_000) {
+                        compose.onAllNodesWithText("Together navigation movie").fetchSemanticsNodes().isNotEmpty()
+                    }
+                } catch (error: ComposeTimeoutException) {
+                    compose.onRoot().printToLog("SAOREO_NAVIGATION")
+                    throw error
                 }
                 assertEquals(roomId, host.state.value.room)
                 assertEquals(mediaId, host.state.value.media?.id)
