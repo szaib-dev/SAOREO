@@ -1,6 +1,14 @@
 package com.codetic.saoreo
 
 import android.Manifest
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import androidx.core.content.FileProvider
+import androidx.media3.datasource.DataSpec
+import java.io.File
+import java.nio.ByteBuffer
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
@@ -23,6 +31,7 @@ import org.junit.Test
 class TogetherCallNavigationTest {
     @get:Rule val compose = createAndroidComposeRule<TogetherActivity>()
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     @Test fun backAndStreamKeepTheSameCallAndPlayback() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val key = InstrumentationRegistry.getArguments().getString("togetherKey").orEmpty()
@@ -32,6 +41,7 @@ class TogetherCallNavigationTest {
         lateinit var partner: TogetherSession
         lateinit var partnerCall: TogetherCall
         lateinit var partnerEvents: Job
+        var localVideo: File? = null
         compose.activityRule.scenario.onActivity { activity ->
             host = ViewModelProvider(activity)[TogetherSession::class.java]
             partner = TogetherSession(activity.application)
@@ -68,13 +78,33 @@ class TogetherCallNavigationTest {
             compose.onNodeWithText("Stream").performClick()
             compose.onNodeWithText("Choose what to watch").assertIsDisplayed()
             assertSame(remoteTrack, host.callController.state.value.remoteVideo)
+            val context = instrumentation.targetContext
+            val fixture = File(File(context.cacheDir, "transcript-clipboard").apply { mkdirs() },
+                "Together navigation movie.mp4")
+            localVideo = fixture
             runBlocking {
+                withContext(Dispatchers.IO) { makePlaybackFixture(instrumentation, fixture) }
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.transcripts", fixture)
+                val local = host.shareLocalVideo(context.contentResolver, uri)
                 withContext(Dispatchers.Main) {
-                    host.setMedia(TogetherMedia("", "stream",
-                        "https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4",
-                        "Together navigation movie", 0, false))
+                    assertTrue(host.setMedia(local.copy(title = "Together navigation movie")))
                 }
-                withTimeout(20_000) { partner.state.first { it.media != null } }
+                val received = withTimeout(20_000) { partner.state.first { it.media != null }.media!! }
+                withContext(Dispatchers.IO) {
+                    val range = partner.uploadDataSource().createDataSource()
+                    try {
+                        val expected = fixture.inputStream().use { it.readNBytes(128) }
+                        range.open(DataSpec.Builder().setUri(partner.sharedFileUrl(received.source)).setLength(128).build())
+                        val actual = ByteArray(expected.size)
+                        var total = 0
+                        while (total < actual.size) {
+                            val read = range.read(actual, total, actual.size - total)
+                            check(read > 0) { "Shared video returned an incomplete range" }
+                            total += read
+                        }
+                        assertArrayEquals(expected, actual)
+                    } finally { range.close() }
+                }
                 withContext(Dispatchers.Main) { partner.status(true) }
             }
             compose.waitUntil(60_000) { host.state.value.canStartPlayback }
@@ -123,9 +153,45 @@ class TogetherCallNavigationTest {
                 partner.leave()
                 host.leave()
             }
+            localVideo?.delete()
             java.security.KeyStore.getInstance("AndroidKeyStore").apply {
                 load(null); deleteEntry(identityName)
             }
+        }
+    }
+
+    private fun makePlaybackFixture(instrumentation: android.app.Instrumentation, output: File) {
+        val extractor = MediaExtractor()
+        val muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        try {
+            instrumentation.context.assets.openFd("playback-fixture.mp4").use { input ->
+                extractor.setDataSource(input.fileDescriptor, input.startOffset, input.length)
+                val tracks = (0 until extractor.trackCount).map { index ->
+                    val format = extractor.getTrackFormat(index)
+                    extractor.selectTrack(index)
+                    muxer.addTrack(format) to format.getLong(MediaFormat.KEY_DURATION)
+                }
+                val durationUs = tracks.maxOf { it.second }
+                val data = ByteBuffer.allocate(512 * 1024)
+                val info = MediaCodec.BufferInfo()
+                muxer.start()
+                repeat(16) { pass ->
+                    extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    while (extractor.sampleTrackIndex >= 0) {
+                        val track = tracks[extractor.sampleTrackIndex].first
+                        val length = extractor.readSampleData(data, 0)
+                        if (length < 0) break
+                        info.set(0, length, pass * durationUs + extractor.sampleTime,
+                            extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC)
+                        muxer.writeSampleData(track, data, info)
+                        extractor.advance()
+                    }
+                }
+                muxer.stop()
+            }
+        } finally {
+            extractor.release()
+            muxer.release()
         }
     }
 }
