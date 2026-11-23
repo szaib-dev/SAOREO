@@ -48,6 +48,15 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startAvailability() else pairing.error("Allow notifications to receive calls when Together is closed.")
     }
+    LaunchedEffect(partner) {
+        val preferences = context.getSharedPreferences("together-background-setup", Context.MODE_PRIVATE)
+        if (!preferences.getBoolean("offered", false)) {
+            preferences.edit().putBoolean("offered", true).apply()
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                startAvailability()
+            } else notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     Text(partner, style = MaterialTheme.typography.headlineSmall)
     Text(when {
         !state.connected -> "Connecting to Together…"
@@ -59,11 +68,15 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
             Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
         }
     }
-    Button({ pairing.ring(kind) }, enabled = state.online && state.ring == null, modifier = Modifier.fillMaxWidth()) {
+    Button({ pairing.ring(kind) }, enabled = state.connected && state.ring == null, modifier = Modifier.fillMaxWidth()) {
         val icon = when (kind) { PairKind.WATCH -> R.drawable.ic_media_play; PairKind.AUDIO -> R.drawable.ic_call; PairKind.VIDEO -> R.drawable.ic_camera }
         Icon(painterResource(icon), null, Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
         Text(when (kind) { PairKind.WATCH -> "Send watch invite"; PairKind.AUDIO -> "Start audio call"; PairKind.VIDEO -> "Start video call" })
+    }
+    if (kind != PairKind.WATCH) OutlinedButton({ pairing.ring(kind, silent = true) },
+        enabled = state.connected && state.ring == null, modifier = Modifier.fillMaxWidth()) {
+        Text("Call silently")
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically) {
@@ -152,7 +165,7 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
     }
     val incoming = ring?.takeIf { it.incoming && !expired && state.visible }
     DisposableEffect(incoming?.id) {
-        val ringtone = incoming?.let {
+        val ringtone = incoming?.takeIf { !it.silent && togetherCallAlertsAllowed(context) }?.let {
             runCatching {
                 RingtoneManager.getRingtone(context, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
                     ?.apply { isLooping = true; play() }
@@ -168,7 +181,7 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
             confirmButton = { Button({ pairing.answer(ring.id, true) }) { Text("Accept") } },
             dismissButton = { TextButton({ pairing.answer(ring.id, false) }) { Text("Decline") } })
     } else {
-        AlertDialog(onDismissRequest = { pairing.cancel(ring.id) }, title = { Text("Ringing $partner…") },
+        AlertDialog(onDismissRequest = { pairing.cancel(ring.id) }, title = { Text(if (ring.silent) "Calling $partner silently…" else "Ringing $partner…") },
             text = { Text(ring.kind.title) }, confirmButton = { TextButton({ pairing.cancel(ring.id) }) { Text("Cancel request") } })
     }
 }
@@ -178,12 +191,13 @@ internal fun TogetherIncomingCall(ring: PairRing, partner: String, answer: (Bool
     val context = LocalContext.current
     val activity = androidx.activity.compose.LocalActivity.current
     DisposableEffect(ring.id) {
-        activity?.setShowWhenLocked(true)
-        activity?.setTurnScreenOn(true)
-        val ringtone = runCatching {
+        val alert = !ring.silent && togetherCallAlertsAllowed(context)
+        activity?.setShowWhenLocked(alert)
+        activity?.setTurnScreenOn(alert)
+        val ringtone = if (alert) runCatching {
             RingtoneManager.getRingtone(context, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
                 ?.apply { isLooping = true; play() }
-        }.getOrNull()
+        }.getOrNull() else null
         onDispose {
             ringtone?.stop()
             activity?.setShowWhenLocked(false)

@@ -15,6 +15,17 @@ The engine decision considered invoking a host Python runtime and provisioning s
 
 ## Upstream sources and licensing
 
+The Android FFmpeg and Python process launcher resolves `libc++_shared.so` from the APK's ABI-specific native directory. The two copies come from [Android NDK r28c](https://developer.android.com/ndk/downloads). The C++ runtime is part of [LLVM libc++](https://libcxx.llvm.org/), distributed under [Apache 2.0 with LLVM exceptions](https://llvm.org/LICENSE.txt).
+
+The FFmpeg archive also requires four libraries supplied from the official [Termux package repository](https://packages.termux.dev/apt/termux-main/). The ABI-specific supplemental libraries are installed in a private directory that the FFmpeg subprocess uses at runtime.
+
+| Termux package | Version | Library | Source |
+| --- | --- | --- | --- |
+| libandroid-posix-semaphore | 0.1-4 | `libandroid-posix-semaphore.so` | [package source](https://github.com/termux/termux-packages/tree/master/packages/libandroid-posix-semaphore) |
+| libandroid-support | 29-1 | `libandroid-support.so` | [package source](https://github.com/termux/termux-packages/tree/master/packages/libandroid-support) |
+| libexpat | 2.10.0 | `libexpat.so.1` | [package source](https://github.com/termux/termux-packages/tree/master/packages/libexpat) |
+| openssl | 1:3.6.5 | `libcrypto.so.3` | [package source](https://github.com/termux/termux-packages/tree/master/packages/openssl) |
+
 - [youtubedl-android release 0.18.1](https://github.com/yausername/youtubedl-android/releases/tag/0.18.1), GPL-3.0. The linked version supplies Python, FFmpeg and QuickJS. See the accompanying GPL text and upstream source.
 - [yt-dlp release 2026.10.26](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26), Unlicense with additional third-party terms for the released ZIP. The official checksum manifest and its signature are included.
 - [yt-dlp-ejs 0.8.0](https://github.com/yt-dlp/ejs), included within the engine ZIP. Review embedded third-party licenses before distribution.

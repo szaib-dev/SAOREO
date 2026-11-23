@@ -56,6 +56,8 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     private var socket: WebSocket? = null
     private var token = ""
     private var endpoint = ""
+    var roomCallSecret: String? = null
+        private set
     private var seq = 0L
     private var generation = 0
     private var reconnect: Job? = null
@@ -75,7 +77,9 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     fun clearAnswer() { mutable.value = mutable.value.copy(answer = null) }
     fun error(message: String) { mutable.value = mutable.value.copy(error = message) }
 
-    fun inviteLink(): String = "$endpoint/together/join?invite=${state.value.invite}"
+    fun inviteLink(): String = Uri.Builder().scheme("saoreo").authority("together").path("/join")
+        .appendQueryParameter("server", endpoint).appendQueryParameter("invite", state.value.invite)
+        .fragment(roomCallSecret).build().toString()
 
     fun uploadUrl(id: String): String = "$endpoint/together/media/${state.value.room}/$id"
 
@@ -112,10 +116,14 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
 
     fun enter(url: String, name: String, key: String? = null, invite: String? = null) {
         if (mutable.value.connecting || mutable.value.room.isNotEmpty()) return
-        val base = TogetherSources.endpoint(url) ?: return error("Enter a valid HTTPS server address")
+        val link = invite?.trim()?.takeIf { it.startsWith("saoreo://together/join?") }?.let(Uri::parse)
+        val base = TogetherSources.endpoint(link?.getQueryParameter("server") ?: url)
+            ?: return error("Enter a valid HTTPS server address")
         val invitation = invite?.let { TogetherSources.invite(it) ?: return error("Paste the complete invitation code") }
         if (name.isBlank()) return error("Enter your name")
         endpoint = base
+        roomCallSecret = if (invitation == null) newCallPairingSecret()
+            else link?.fragment?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{43}")) }
         leaving = false
         mutable.value = TogetherState(connecting = true)
         enterRequest = viewModelScope.launch {
@@ -142,6 +150,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     }
 
     fun enterPair(launch: PairLaunch) {
+        roomCallSecret = null
         if (state.value.room == launch.ticket.getString("room") && endpoint == launch.server) return
         enterRequest?.cancel()
         if (state.value.room.isNotEmpty()) leave()
@@ -302,6 +311,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         enterRequest?.cancel()
         send("leave")
         sharedFiles.clear()
+        roomCallSecret = null
         leaving = true; generation++; reconnect?.cancel(); heartbeat?.cancel()
         socket?.close(1000, "Left room"); socket = null; token = ""
         onConnectionLost?.invoke()

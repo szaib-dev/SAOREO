@@ -258,12 +258,15 @@ internal val playlistOrderMigration = object : Migration(4, 5) {
 }
 
 class SaoreoApp : Application(), ImageLoaderFactory {
+    internal lateinit var screenCaptureProtection: ScreenCaptureProtection
+        private set
     val preferences by lazy { PreferencesStore(this) }
     internal val pairing by lazy { TogetherPairing(this) }
     internal val database by lazy { Room.databaseBuilder(this, DownloadDb::class.java, "downloads.db")
         .addMigrations(collectionsMigration, libraryMigration, playlistArtworkMigration, playlistOrderMigration).build() }
     val dao get() = database.downloads()
     internal val collections by lazy { Collections(this) }
+    internal val lyrics by lazy { LyricsRepository(this) }
     internal val audioControl = AudioControl()
     internal val youtubeDiagnostics = YoutubeDiagnostics(this)
     val extractor by lazy { Extractor(this) }
@@ -276,6 +279,8 @@ class SaoreoApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        screenCaptureProtection = ScreenCaptureProtection(this)
+        lyrics.start()
         converter.recover
     }
 

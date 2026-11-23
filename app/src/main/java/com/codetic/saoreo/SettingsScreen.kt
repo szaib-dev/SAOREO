@@ -40,6 +40,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val screenCapture by app.screenCaptureProtection.enabled.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var pendingFolder by rememberSaveable { mutableStateOf(Source.WHATSAPP) }
     var confirmation by remember { mutableStateOf<String?>(null) }
@@ -97,6 +98,13 @@ fun SettingsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modi
         PreferenceGroup("Look & feel") {
             SettingChoice("Appearance", settings.theme, listOf("System", "Light", "Dark"), { it }) { set(SettingKeys.theme, it) }
             SettingSwitch("Haptic feedback", settings.haptic, "A little feedback when a download starts.") { set(SettingKeys.haptic, it) }
+        }
+        PreferenceGroup("Privacy") {
+            SettingSwitch("Screen Capture Protection", screenCapture,
+                "Hide SAOREO from screenshots, recordings, and recent-app previews. SAOREO will also be hidden when you share your screen.") {
+                app.screenCaptureProtection.setEnabled(it)
+            }
+            TextButton({ confirmation = "forgetCallDevices" }) { Text("Forget verified call devices") }
         }
         PreferenceGroup("Downloads") {
             SettingChoice("Link confirmation", settings.autoShare, listOf(false, true),
@@ -180,19 +188,22 @@ fun SettingsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modi
     } else confirmation?.let { dialog ->
         val title = when (dialog) {
             "history" -> "Clear download history?"
+            "forgetCallDevices" -> "Forget the verified call device?"
             else -> "Open-source components"
         }
         AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(title) }, text = {
             Text(when (dialog) {
                 "history" -> "Removes finished history entries. Saved gallery files remain available."
+                "forgetCallDevices" -> "To call again, unpair in Together and share a new secure pairing link."
                 else -> "AndroidX, Compose, Coil and OkHttp (Apache 2.0)\nyoutubedl-android (GPL-3.0)\nyt-dlp (Unlicense)\nPython (PSF) · QuickJS (MIT)\nFFmpeg, bundled by youtubedl-android"
             })
         }, confirmButton = {
             TextButton(onClick = {
                 confirmation = null
                 if (dialog == "history") act { app.downloads.clearHistory() }
-            }) { Text(if (dialog == "history") "Clear" else "Close") }
-        }, dismissButton = if (dialog == "history") {
+                if (dialog == "forgetCallDevices") CallIdentity(app).forgetAll()
+            }) { Text(when (dialog) { "history" -> "Clear"; "forgetCallDevices" -> "Forget"; else -> "Close" }) }
+        }, dismissButton = if (dialog in setOf("history", "forgetCallDevices")) {
             { TextButton(onClick = { confirmation = null }) { Text("Cancel") } }
         } else null)
     }

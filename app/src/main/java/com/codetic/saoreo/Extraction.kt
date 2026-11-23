@@ -4,7 +4,6 @@ import android.content.Context
 import android.system.Os
 import android.os.SystemClock
 import android.util.Log
-import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
@@ -45,7 +44,7 @@ class Extractor(private val context: Context) {
         initialization = listOf(
             "engine.zip_verification" to measureInit { installEngine() },
             "engine.python_package_init" to measureInit { YoutubeDL.init(context) },
-            "engine.ffmpeg_package_init" to measureInit { FFmpeg.init(context) },
+            "engine.ffmpeg_package_init" to measureInit { FfmpegRuntime.initialize(context) },
         )
         Log.i(TAG, "engine_init_ms=${SystemClock.elapsedRealtime() - started}")
         YoutubeDL

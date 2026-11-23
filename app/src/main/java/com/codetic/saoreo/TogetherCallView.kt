@@ -62,7 +62,7 @@ internal fun TogetherCallView(
         if (!calling.active) connectedAt = 0L
         else if (calling.connection == "Connected" && connectedAt == 0L) connectedAt = SystemClock.elapsedRealtime()
     }
-    val localMain = localFocused && !previewHidden && localVideoOn
+    val localMain = localFocused && !previewHidden && localVideoOn && peerVideoOn
     val hasPreview = localVideoOn && !previewHidden
     val showControls = controlsVisible || chatOpen
     fun hideOrShowPreview() {
@@ -108,6 +108,9 @@ internal fun TogetherCallView(
                 if (localMain) localVideoOn else peerVideoOn, call, localMain && !calling.sharing,
                 Modifier.fillMaxSize(), rounded = false, showLabel = false, overlay = false,
             )
+            if (calling.remoteBackground) Text("$peerName is using other apps",
+                Modifier.align(Alignment.Center).background(CallGlass, RoundedCornerShape(12.dp)).padding(12.dp),
+                color = Color.White)
             Box(Modifier.matchParentSize().clickable(
                 interactionSource = null, indication = null,
                 onClickLabel = if (showControls) "Hide call controls" else "Show call controls",
@@ -129,7 +132,7 @@ internal fun TogetherCallView(
                                 if (dragHeightPx > 0f) previewY = (previewY + amount.y / dragHeightPx).coerceIn(0f, 1f)
                             }
                         }
-                        .clickable(interactionSource = null, indication = null, onClickLabel = "Swap video views") {
+                        .clickable(enabled = peerVideoOn, interactionSource = null, indication = null, onClickLabel = "Swap video views") {
                             localFocused = !localMain
                         },
                     fill = !calling.sharing && !localMain,

@@ -80,6 +80,20 @@ class PairingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.event(a, 'pairState', lambda s: s['partner'] is None))['partner'])
         self.assertEqual(404, (await self.post('accept', self.b, code=code, name='Sam'))[0])
 
+    async def test_request_waits_for_partner_reconnection(self):
+        await self.pair()
+        a = await self.socket(self.a)
+        await self.event(a, 'pairState')
+        await a.send_json(dict(type='ring', kind='video_silent'))
+        outgoing = await self.event(a, 'pairState', lambda s: s['ring'] is not None)
+        b = await self.socket(self.b)
+        incoming = await self.event(b, 'pairState', lambda s: s['ring'] is not None)
+        self.assertEqual(outgoing['ring']['id'], incoming['ring']['id'])
+        await b.send_json(dict(type='answer', id=incoming['ring']['id'], accepted=True))
+        self.assertEqual('video', (await self.event(a, 'pairLaunch'))['kind'])
+        await a.close()
+        await b.close()
+
     async def test_standalone_requests_open_a_room_only_after_the_partner_accepts(self):
         await self.pair()
         a, b = await self.socket(self.a), await self.socket(self.b)
@@ -95,19 +109,19 @@ class PairingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('declined', (await self.event(a, 'ringResult'))['outcome'])
         self.assertEqual({}, self.service.rooms)
 
-        for kind in ('audio', 'video', 'watch'):
+        for kind in ('audio', 'video', 'watch', 'audio_silent', 'video_silent'):
             await a.send_json(dict(type='ring', kind=kind))
             ring = (await self.event(b, 'pairState', lambda s: s['ring'] is not None))['ring']
             self.assertEqual(kind, ring['kind'])
             await b.send_json(dict(type='answer', id=ring['id'], accepted=True))
             left, right = await self.event(a, 'pairLaunch'), await self.event(b, 'pairLaunch')
-            self.assertEqual(kind, left['kind'])
-            self.assertEqual(kind, right['kind'])
+            self.assertEqual(kind.removesuffix('_silent'), left['kind'])
+            self.assertEqual(kind.removesuffix('_silent'), right['kind'])
             self.assertEqual(left['ticket']['room'], right['ticket']['room'])
             self.assertNotEqual(left['ticket']['token'], right['ticket']['token'])
             for ws, event in ((a, left), (b, right)):
                 await ws.send_json(dict(type='ack', id=event['id']))
-        self.assertEqual(3, len(self.service.rooms))
+        self.assertEqual(5, len(self.service.rooms))
 
     async def test_watch_invite_uses_existing_room_only_with_its_owner_ticket(self):
         await self.pair()

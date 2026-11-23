@@ -16,10 +16,12 @@ import org.webrtc.audio.JavaAudioDeviceModule
 internal data class TogetherCallState(val active: Boolean = false, val mic: Boolean = false, val camera: Boolean = false,
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
     val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
-    val error: String? = null)
+    val error: String? = null, val remoteBackground: Boolean = false)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
-internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false) : AutoCloseable {
+internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false,
+    private val identity: CallIdentity = CallIdentity(context),
+) : AutoCloseable {
     private val main = Handler(Looper.getMainLooper())
     private val mutable = MutableStateFlow(TogetherCallState())
     val state = mutable.asStateFlow()
@@ -48,6 +50,29 @@ internal class TogetherCall(private val context: Context, private val session: T
     private var offerStarted = false
     private val candidates = mutableListOf<IceCandidate>()
     private var peerGeneration = 0
+    private var authentication: CallAuthentication? = null
+    private var authenticatingRoom: String? = null
+    private var authenticatingPeer: String? = null
+    private var authenticatingRoomSecret: String? = null
+    private var approval: JSONObject? = null
+    private var authenticationStarted = 0L
+    private val retryAuthentication = object : Runnable {
+        override fun run() {
+            val exchange = authentication ?: return
+            if (!mutable.value.active || peer != null) return
+            if (runCatching { sendSignal(exchange.hello); approval?.let(::sendSignal) }.isFailure) {
+                resetAuthentication()
+                reportError("Android couldn't sign the call verification message.")
+                return
+            }
+            if (!exchange.ready && android.os.SystemClock.elapsedRealtime() - authenticationStarted > 15_000 &&
+                mutable.value.connection == "Verifying call identity") {
+                mutable.value = mutable.value.copy(connection = "Waiting for verified device",
+                    error = "Both phones need the updated app and the same secure pairing or room invitation.")
+            }
+            main.postDelayed(this, 1400)
+        }
+    }
 
     init {
         PeerConnectionFactory.initialize(PeerConnectionFactory.InitializationOptions.builder(context).createInitializationOptions())
@@ -84,6 +109,11 @@ internal class TogetherCall(private val context: Context, private val session: T
         announce()
         members(session.state.value)
         routeAudio()
+    }
+    private var inBackground = false
+    fun background(enabled: Boolean) {
+        inBackground = enabled
+        sendAuthenticated(JSONObject().put("type", "background").put("enabled", enabled))
     }
     fun microphone(enabled: Boolean) {
         audioTrack.setEnabled(enabled && mutable.value.active)
@@ -168,15 +198,41 @@ internal class TogetherCall(private val context: Context, private val session: T
         val other = room.members.firstOrNull { it.id != room.member && it.online && it.call }
         if (!room.connected) return
         if (mutable.value.active && me?.call == false) {
-            if (peer != null) disposePeer()
+            if (authentication != null || peer != null) resetAuthentication()
             announce()
             return
         }
         if (!mutable.value.active || other == null) {
-            disposePeer()
+            if (authentication != null || peer != null) resetAuthentication()
             if (mutable.value.active) mutable.value = mutable.value.copy(connection = "Waiting for your partner")
             return
         }
+        if (authenticatingRoom != room.room || authenticatingPeer != other.id || authenticatingRoomSecret != session.roomCallSecret) {
+            resetAuthentication()
+            val roomSecret = session.roomCallSecret
+            val exchange = runCatching {
+                if (roomSecret == null && room.pairKind == null) null
+                else identity.exchange(room.room, room.member, other.id, roomSecret)
+            }.getOrElse {
+                mutable.value = mutable.value.copy(connection = "Verification unavailable", error = "Android could not open the device’s call key.")
+                return
+            }
+            if (exchange == null) {
+                if (mutable.value.connection != "Secure pairing required") {
+                    mutable.value = mutable.value.copy(connection = "Secure pairing required",
+                        error = "Join through a new secure room link, or securely pair both phones before calling.")
+                }
+                return
+            }
+            authentication = exchange
+            authenticatingRoom = room.room
+            authenticatingPeer = other.id
+            authenticatingRoomSecret = roomSecret
+            authenticationStarted = android.os.SystemClock.elapsedRealtime()
+            mutable.value = mutable.value.copy(connection = "Verifying call identity")
+            retryAuthentication.run()
+        }
+        if (authentication?.ready != true) return
         if (remoteId != other.id || peer == null) createPeer(other.id)
         if (me?.ordinal == 0 && !offerStarted) {
             offerStarted = true
@@ -226,8 +282,8 @@ internal class TogetherCall(private val context: Context, private val session: T
             }
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onIceCandidate(candidate: IceCandidate) {
-                main.post { if (run == peerGeneration) session.send("signal", JSONObject().put("payload", JSONObject()
-                    .put("type", "candidate").put("candidate", candidate.sdp).put("mid", candidate.sdpMid).put("line", candidate.sdpMLineIndex))) }
+                main.post { if (run == peerGeneration) sendAuthenticated(JSONObject()
+                    .put("type", "candidate").put("candidate", candidate.sdp).put("mid", candidate.sdpMid).put("line", candidate.sdpMLineIndex)) }
             }
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
             override fun onAddStream(stream: MediaStream) {}
@@ -263,32 +319,95 @@ internal class TogetherCall(private val context: Context, private val session: T
 
     private fun signal(data: JSONObject) {
         if (!mutable.value.active || closed) return
-        members(session.state.value)
+        val room = session.state.value
+        members(room)
+        val exchange = authentication ?: return
+        when (data.optString("type")) {
+            "authHello" -> {
+                if (!exchange.receiveHello(data)) return
+                val pinned = identity.pairedFingerprint()
+                if (authenticatingRoomSecret != null || pinned == exchange.remoteFingerprint ||
+                    pinned == null && identity.rememberPaired(exchange)) {
+                    approve(exchange)
+                } else if (mutable.value.connection != "Partner device key changed") {
+                    mutable.value = mutable.value.copy(connection = "Partner device key changed",
+                        error = "This paired device’s key changed. Securely pair the devices again before calling.")
+                }
+                return
+            }
+            "authReady" -> {
+                if (!exchange.receiveApproval(data)) return
+                if (peer == null) approval?.let(::sendSignal)
+                members(room)
+                return
+            }
+            "authenticatedSignal" -> Unit
+            else -> return
+        }
+        val payload = exchange.open(data) ?: return
         val pc = peer ?: return
         val run = peerGeneration
-        when (data.optString("type")) {
+        when (payload.optString("type")) {
+            "background" -> mutable.value = mutable.value.copy(remoteBackground = payload.optBoolean("enabled"))
             "offer", "answer" -> {
-                val type = SessionDescription.Type.fromCanonicalForm(data.getString("type"))
+                val type = SessionDescription.Type.fromCanonicalForm(payload.getString("type"))
+                val description = payload.getString("sdp")
+                if (!secureFingerprint.containsMatchIn(description)) return
                 pc.setRemoteDescription(sdpObserver(onSet = {
                     if (run == peerGeneration) {
                         hasRemoteDescription = true
                         candidates.toList().forEach { pc.addIceCandidate(it) }; candidates.clear()
                         if (type == SessionDescription.Type.OFFER) pc.createAnswer(sdpObserver(onCreated = { if (run == peerGeneration) localDescription(it) }), MediaConstraints())
                     }
-                }), SessionDescription(type, data.getString("sdp")))
+                }), SessionDescription(type, description))
             }
             "candidate" -> {
-                val c = IceCandidate(data.optString("mid"), data.getInt("line"), data.getString("candidate"))
+                val c = IceCandidate(payload.optString("mid"), payload.getInt("line"), payload.getString("candidate"))
                 if (hasRemoteDescription) pc.addIceCandidate(c) else if (candidates.size < 128) candidates.add(c)
             }
         }
     }
     private fun localDescription(description: SessionDescription) {
+        if (!secureFingerprint.containsMatchIn(description.description)) {
+            stop()
+            reportError("The call cannot negotiate a SHA-256 media fingerprint.")
+            return
+        }
         val run = peerGeneration
         peer?.setLocalDescription(sdpObserver(onSet = {
-            if (run == peerGeneration) session.send("signal", JSONObject().put("payload", JSONObject()
-                .put("type", description.type.canonicalForm()).put("sdp", description.description)))
+            if (run == peerGeneration) sendAuthenticated(JSONObject()
+                .put("type", description.type.canonicalForm()).put("sdp", description.description))
         }), description)
+    }
+    private fun sendSignal(payload: JSONObject) = session.send("signal", JSONObject().put("payload", payload))
+
+    private fun sendAuthenticated(payload: JSONObject) {
+        val exchange = authentication?.takeIf { it.ready } ?: return
+        runCatching { sendSignal(exchange.seal(payload)) }.onFailure {
+            resetAuthentication()
+            reportError("Signing the call setup failed. End and rejoin the call.")
+        }
+    }
+
+    private fun approve(exchange: CallAuthentication) {
+        if (approval == null) {
+            exchange.confirm()
+            approval = exchange.approval()
+            sendSignal(exchange.hello)
+            approval?.let(::sendSignal)
+        }
+        members(session.state.value)
+        background(inBackground)
+    }
+
+    private fun resetAuthentication() {
+        main.removeCallbacks(retryAuthentication)
+        authentication = null
+        authenticatingRoom = null
+        authenticatingPeer = null
+        authenticatingRoomSecret = null
+        approval = null
+        disposePeer()
     }
     private fun sdpObserver(onCreated: (SessionDescription) -> Unit = {}, onSet: () -> Unit = {}) = object : SdpObserver {
         override fun onCreateSuccess(description: SessionDescription) { main.post { if (!closed) onCreated(description) } }
@@ -305,7 +424,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     }
     fun stop() {
         stopScreenShare()
-        camera(false); audioTrack.setEnabled(false); disposePeer()
+        camera(false); audioTrack.setEnabled(false); resetAuthentication()
         mutable.value = mutable.value.copy(active = false, mic = false, camera = false, connection = "Call is off", error = null)
         announce()
         TogetherActiveCallService.end(context, this)
@@ -369,6 +488,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         factory.dispose(); adm.release(); egl.release()
     }
     companion object {
+        private val secureFingerprint = Regex("(?mi)^a=fingerprint:sha-256 (?:[0-9a-f]{2}:){31}[0-9a-f]{2}\\r?$")
         fun outputName(device: AudioDeviceInfo): String = when (device.type) {
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
             AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"

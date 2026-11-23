@@ -17,7 +17,7 @@ import org.json.JSONObject
 
 internal const val TOGETHER_SERVER = "https://szaibdev.duckdns.org:8765"
 
-internal data class PairLink(val server: String, val code: String) {
+internal data class PairLink(val server: String, val code: String, val callSecret: String?) {
     companion object {
         fun parse(uri: Uri?): PairLink? {
             if (uri == null || !uri.isHierarchical) return null
@@ -29,7 +29,10 @@ internal data class PairLink(val server: String, val code: String) {
             }
             val server = TogetherSources.endpoint(endpoint) ?: return null
             val code = uri.getQueryParameter("code")?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{43}")) } ?: return null
-            return PairLink(server, code)
+            val secret = uri.fragment?.takeIf {
+                it.matches(Regex("[A-Za-z0-9_-]{43}"))
+            }
+            return PairLink(server, code, secret)
         }
     }
 }
@@ -42,7 +45,7 @@ internal enum class PairKind(val wire: String, val title: String) {
     }
 }
 
-internal data class PairRing(val id: String, val kind: PairKind, val incoming: Boolean, val until: Long)
+internal data class PairRing(val id: String, val kind: PairKind, val incoming: Boolean, val until: Long, val silent: Boolean)
 internal data class PairLaunch(val id: String, val server: String, val kind: PairKind, val ticket: JSONObject)
 internal data class PairState(
     val partner: String? = null,
@@ -57,6 +60,7 @@ internal data class PairState(
 
 /** The pairing socket discovers the paired device. Each accepted request has separate room credentials. */
 internal class TogetherPairing(app: Application) {
+    private val callIdentity = CallIdentity(app)
     private val preferences = app.getSharedPreferences("together-pairing", 0)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val random = SecureRandom()
@@ -99,21 +103,28 @@ internal class TogetherPairing(app: Application) {
         val endpoint = TogetherSources.endpoint(address) ?: throw IOException("Enter a valid HTTPS server address")
         check(mutable.value.partner == null) { "Unpair your current partner first." }
         val reply = post(endpoint, "invite", JSONObject().put("name", name).put("key", key))
+        val secret = newCallPairingSecret()
+        check(callIdentity.startPairing(secret)) { "Couldn’t store the secure pairing key." }
         use(endpoint, null)
-        return "$endpoint/together/pair?code=${reply.getString("code")}"
+        return Uri.parse("$endpoint/together/pair").buildUpon()
+            .appendQueryParameter("code", reply.getString("code"))
+            .fragment(secret).build().toString()
     }
 
     suspend fun preview(link: PairLink): String = post(link.server, "preview", JSONObject().put("code", link.code)).getString("name")
 
     suspend fun accept(link: PairLink, name: String) {
-        check(server == link.server || mutable.value.partner == null) { "Unpair your current partner first." }
+        check(mutable.value.partner == null) { "Unpair your current partner first." }
+        val secret = requireNotNull(link.callSecret) { "Ask your partner for a new secure pairing link." }
         val reply = post(link.server, "accept", JSONObject().put("code", link.code).put("name", name))
+        check(callIdentity.startPairing(secret)) { "Couldn’t store the secure pairing key." }
         use(link.server, reply.getString("name"))
     }
 
     suspend fun unpair() {
         val endpoint = server ?: return
         post(endpoint, "unpair", JSONObject())
+        callIdentity.forgetAll()
         savePartner(null)
         mutable.value = mutable.value.copy(partner = null, online = false, ring = null, launch = null)
     }
@@ -202,9 +213,11 @@ internal class TogetherPairing(app: Application) {
                 val partner = message.optString("partner").takeUnless { it.isBlank() || it == "null" }
                 if (partner != mutable.value.partner) savePartner(partner)
                 val ring = message.optJSONObject("ring")?.let { item ->
-                    val kind = PairKind.fromWire(item.getString("kind")) ?: return@let null
+                    val wire = item.getString("kind")
+                    val silent = wire.endsWith("_silent")
+                    val kind = PairKind.fromWire(wire.removeSuffix("_silent")) ?: return@let null
                     val remaining = item.getLong("remaining").coerceIn(0L, 30_000L)
-                    PairRing(item.getString("id"), kind, item.getBoolean("incoming"), SystemClock.elapsedRealtime() + remaining)
+                    PairRing(item.getString("id"), kind, item.getBoolean("incoming"), SystemClock.elapsedRealtime() + remaining, silent)
                 }
                 mutable.value = mutable.value.copy(connected = true, partner = partner, online = message.optBoolean("online"), ring = ring,
                     launch = mutable.value.launch.takeIf { partner != null })
@@ -233,7 +246,8 @@ internal class TogetherPairing(app: Application) {
         return false
     }
 
-    fun ring(kind: PairKind, room: JSONObject? = null) = send("ring", (room ?: JSONObject()).put("kind", kind.wire))
+    fun ring(kind: PairKind, room: JSONObject? = null, silent: Boolean = false) =
+        send("ring", (room ?: JSONObject()).put("kind", if (silent && kind != PairKind.WATCH) "${kind.wire}_silent" else kind.wire))
     fun answer(id: String, accepted: Boolean) = send("answer", JSONObject().put("id", id).put("accepted", accepted))
     fun cancel(id: String) = send("cancel", JSONObject().put("id", id))
     fun joined(launch: PairLaunch) {

@@ -21,7 +21,8 @@ internal class YoutubeProcess(private val context: Context) {
                 "--ffmpeg-location", File(bin, "libffmpeg.so").absolutePath) + arguments
             val builder = ProcessBuilder(command)
             builder.environment().apply {
-                this["LD_LIBRARY_PATH"] = listOf("python", "ffmpeg", "aria2c").joinToString(":") { File(packages, "$it/usr/lib").absolutePath }
+                this["LD_LIBRARY_PATH"] = (listOf(bin.absolutePath, FfmpegRuntime.supportLibraries(context).absolutePath) + listOf("python", "ffmpeg", "aria2c")
+                    .map { File(packages, "$it/usr/lib").absolutePath }).joinToString(":")
                 this["SSL_CERT_FILE"] = File(python, "etc/tls/cert.pem").absolutePath
                 this["PYTHONHOME"] = python.absolutePath
                 this["HOME"] = python.absolutePath

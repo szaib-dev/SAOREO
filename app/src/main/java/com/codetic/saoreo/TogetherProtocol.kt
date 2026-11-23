@@ -34,7 +34,9 @@ internal object TogetherSources {
 
     fun invite(input: String): String? {
         val text = input.trim()
-        val code = if (text.startsWith("saoreo://")) runCatching { URI(text).rawQuery?.substringAfter("invite=") }.getOrNull()
+        val code = if (text.startsWith("saoreo://")) runCatching {
+            URI(text).rawQuery?.split('&')?.firstOrNull { it.startsWith("invite=") }?.substringAfter('=')
+        }.getOrNull()
         else text.lineSequence().map(String::trim).firstOrNull { it.matches(Regex("[a-f0-9]{12}\\.[A-Za-z0-9_-]{32}")) }
         return code?.takeIf { it.matches(Regex("[a-f0-9]{12}\\.[A-Za-z0-9_-]{32}")) }
     }

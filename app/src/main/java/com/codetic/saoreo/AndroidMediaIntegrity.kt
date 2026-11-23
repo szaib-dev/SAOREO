@@ -29,11 +29,18 @@ internal fun verifyDownloadedMedia(file: File, mime: String, requireAudio: Boole
             if (group !in needed || group in verified) continue
             extractor.selectTrack(index)
             try {
-                extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val sampleSize = extractor.sampleSize
-                if (sampleSize in 1..16L * 1024 * 1024 && sampleSize <= file.length() && extractor.sampleTime >= 0 &&
-                    extractor.readSampleData(ByteBuffer.allocateDirect(sampleSize.toInt()), 0).toLong() == sampleSize) {
-                    verified.add(requireNotNull(group))
+                extractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                // An MP4 edit list can leave decoder priming samples before time zero.
+                // Look for a readable presentation sample after the preroll.
+                for (attempt in 0 until 64) {
+                    val sampleSize = extractor.sampleSize
+                    if (sampleSize in 1..16L * 1024 * 1024 && sampleSize <= file.length() &&
+                        extractor.sampleTime >= 0 &&
+                        extractor.readSampleData(ByteBuffer.allocateDirect(sampleSize.toInt()), 0).toLong() == sampleSize) {
+                        verified.add(requireNotNull(group))
+                        break
+                    }
+                    if (!extractor.advance()) break
                 }
             } finally {
                 extractor.unselectTrack(index)

@@ -38,15 +38,18 @@ class TogetherAcceptanceTest {
         var metrics: Job? = null
         var left: Job? = null
         var right: Job? = null
+        val aKey = "acceptance-call-a-${java.util.UUID.randomUUID()}"
+        val bKey = "acceptance-call-b-${java.util.UUID.randomUUID()}"
         try {
             withContext(Dispatchers.Main) {
                 a = TogetherSession(app); b = TogetherSession(app); sessionsReady = true
                 a.enter("https://szaibdev.duckdns.org:8765", "Android test A", key = key)
             }
             withTimeout(25000) { a.state.first { it.connected } }; android.util.Log.i("SAOREO_TEST", "Creator connected")
-            withContext(Dispatchers.Main) { b.enter("https://szaibdev.duckdns.org:8765", "Android test B", invite = a.state.value.invite) }
+            withContext(Dispatchers.Main) { b.enter("https://szaibdev.duckdns.org:8765", "Android test B", invite = a.inviteLink()) }
             withTimeout(25000) { a.state.first { it.members.count { m -> m.online } == 2 }; b.state.first { it.connected } }
             android.util.Log.i("SAOREO_TEST", "Both connected")
+            if (args.getString("callOnly") != "true") {
             withContext(Dispatchers.Main) { a.setMedia(TogetherMedia("", "youtube", "aqz-KE-bpKQ", "Android acceptance", 0, false)) }
             withTimeout(10000) { a.state.first { it.media != null }; b.state.first { it.media != null } }; android.util.Log.i("SAOREO_TEST", "Media acknowledged on both")
             withContext(Dispatchers.Main) { a.status(true); b.status(true) }
@@ -56,11 +59,14 @@ class TogetherAcceptanceTest {
             withContext(Dispatchers.Main) { a.playback("seek", 45000); a.playback("pause") }
             val paused = withTimeout(10000) { b.state.first { !it.wanted && it.timeline.position >= 45000 } }
             assertFalse(paused.timeline.playing); android.util.Log.i("SAOREO_TEST", "Mutual seek/pause passed")
+            }
             withContext(Dispatchers.Main) { a.send("chat", JSONObject().put("text", "Android partner message")) }
             withTimeout(10000) { b.state.first { it.chat.any { m -> m.text == "Android partner message" } } }
             android.util.Log.i("SAOREO_TEST", "Chat passed")
             withContext(Dispatchers.Main) {
-                ca = TogetherCall(app, a, forceRelay = true); cb = TogetherCall(app, b, forceRelay = true); callsReady = true
+                ca = TogetherCall(app, a, forceRelay = args.getString("directCall") != "true", identity = CallIdentity(app, aKey))
+                cb = TogetherCall(app, b, forceRelay = args.getString("directCall") != "true", identity = CallIdentity(app, bKey))
+                callsReady = true
                 left = main.launch { a.state.collect { ca.members(it) } }
                 right = main.launch { b.state.collect { cb.members(it) } }
                 cb.start(false); ca.start(true)
@@ -98,6 +104,9 @@ class TogetherAcceptanceTest {
                 if (sessionsReady) { a.leave(); b.leave() }
             }
             main.cancel(); activity.close()
+            java.security.KeyStore.getInstance("AndroidKeyStore").apply {
+                load(null); deleteEntry(aKey); deleteEntry(bKey)
+            }
         }
     }
 }

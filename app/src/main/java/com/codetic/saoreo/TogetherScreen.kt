@@ -82,6 +82,8 @@ import org.webrtc.VideoTrack
 
 class TogetherActivity : ComponentActivity() {
     private val pairing get() = (application as SaoreoApp).pairing
+    private var pipMode by mutableStateOf(false)
+    private var currentSession: TogetherSession? = null
     private var initialInvite by mutableStateOf("")
     private var pairLink by mutableStateOf<PairLink?>(null)
     private var notificationAnswer by mutableStateOf<String?>(null)
@@ -96,15 +98,39 @@ class TogetherActivity : ComponentActivity() {
             val settings by app.preferences.flow.collectAsStateWithLifecycle(Settings())
             val session: TogetherSession = viewModel()
             LaunchedEffect(session) {
+                currentSession = session
                 if (initialInvite.isBlank() && pairLink == null && notificationAnswer == null && !intent.hasExtra(EXTRA_SHOW_RING)) {
                     session.restoreGame()
                 }
             }
             AppTheme(settings) {
-                TogetherScreen(session, initialInvite, ::finish, pairing, pairLink, { pairLink = null },
+                if (pipMode) {
+                    val calling by session.callController.state.collectAsState()
+                    val room by session.state.collectAsState()
+                    val partner = room.members.firstOrNull { it.id != room.member }
+                    CameraTile(partner?.name ?: "Partner", calling.remoteVideo,
+                        partner?.camera == true && partner.online, session.callController, false,
+                        Modifier.fillMaxSize(), rounded = false, showLabel = false, clipVideo = true)
+                } else TogetherScreen(session, initialInvite, ::finish, pairing, pairLink, { pairLink = null },
                     notificationAnswer, { notificationAnswer = null })
             }
         }
+    }
+
+    internal fun minimizeCall(): Boolean {
+        if (currentSession?.callController?.state?.value?.active != true) return false
+        return enterPictureInPictureMode(android.app.PictureInPictureParams.Builder()
+            .setAspectRatio(android.util.Rational(9, 16)).build())
+    }
+
+    override fun onPictureInPictureModeChanged(inPictureInPictureMode: Boolean, config: Configuration) {
+        super.onPictureInPictureModeChanged(inPictureInPictureMode, config)
+        pipMode = inPictureInPictureMode
+        currentSession?.callController?.background(inPictureInPictureMode)
+    }
+
+    override fun onUserLeaveHint() {
+        if (!minimizeCall()) super.onUserLeaveHint()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -125,14 +151,17 @@ class TogetherActivity : ComponentActivity() {
 
     private fun readLink(intent: Intent) {
         val ringing = (intent.getBooleanExtra(EXTRA_SHOW_RING, false) || intent.hasExtra(EXTRA_PAIR_ANSWER)) &&
-            pairing.state.value.ring?.incoming == true
+            pairing.state.value.ring?.let { it.incoming && !it.silent } == true && togetherCallAlertsAllowed(this)
         if (ringing) { setShowWhenLocked(true); setTurnScreenOn(true) }
-        val uri = intent.data
+        val uri = intent.data?.let { data ->
+            val secret = intent.getStringExtra("callSecret")?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{43}")) }
+            if (data.fragment == null && secret != null) data.buildUpon().fragment(secret).build() else data
+        }
         pairLink = PairLink.parse(uri)
         initialInvite = uri?.takeIf {
             it.isHierarchical && (it.scheme == "saoreo" && it.host == "together" ||
                 it.scheme == "https" && it.host == "szaibdev.duckdns.org" && it.port == 8765 && it.path == "/together/join")
-        }?.getQueryParameter("invite").orEmpty()
+        }?.let { if (it.scheme == "saoreo" && it.path == "/join") it.toString() else it.getQueryParameter("invite") }.orEmpty()
         notificationAnswer = intent.getStringExtra(EXTRA_PAIR_ANSWER)
     }
 }
@@ -146,6 +175,8 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     notificationAnswer: String?, clearNotificationAnswer: () -> Unit) {
     val room by session.state.collectAsStateWithLifecycle()
     val paired by pairing.state.collectAsStateWithLifecycle()
+    var pastedPairLink by remember { mutableStateOf<PairLink?>(null) }
+    val activePairLink = pairLink ?: pastedPairLink
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current
@@ -331,11 +362,12 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     DisposableEffect(lifecycle, call) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
+                call.background(true)
                 if (session.state.value.connected && session.state.value.media != null) {
                     session.playback("pause")
                 }
             }
-            if (event == Lifecycle.Event.ON_START) { playback.lastStatus = null; playback.report(); call.refreshOutput() }
+            if (event == Lifecycle.Event.ON_START) { call.background(false); playback.lastStatus = null; playback.report(); call.refreshOutput() }
         }
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer) }
@@ -346,7 +378,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             gameState.liveGame() && !callView && !fullscreen -> browseWithGame()
             callView && callChat -> callChat = false
             gameState.liveGame() && standalone -> browseWithGame()
-            standalone -> endRoom()
+            calling.active -> (context as? TogetherActivity)?.minimizeCall()
             callView -> session.fullCall(false)
             fullscreen -> fullMovie = false
             else -> showLeave = true
@@ -368,7 +400,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             callActivity?.setTurnScreenOn(false)
         }
     }
-    if (incoming != null && !expiredIncoming && pairLink == null) {
+    if (incoming != null && !expiredIncoming && activePairLink == null) {
         TogetherIncomingCall(incoming, paired.partner ?: "Your partner") { pairing.answer(incoming.id, it) }
         return
     }
@@ -409,7 +441,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            if (room.room.isEmpty()) TogetherLobby(session, initialInvite, pairing, paired)
+            if (room.room.isEmpty()) TogetherLobby(session, initialInvite, pairing, paired) { pastedPairLink = it }
             else Column(Modifier.fillMaxSize()) {
                 val media = room.media
                 val canControl = room.canStartPlayback && playback.ready
@@ -419,7 +451,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                     val stage = when {
                         callView -> Modifier.fillMaxWidth().height(0.dp)
                         fullscreen -> Modifier.fillMaxWidth().weight(1f)
-                        keyboard || configuration.screenHeightDp < 430 -> Modifier.fillMaxWidth().height(100.dp)
+                        configuration.orientation == Configuration.ORIENTATION_LANDSCAPE && !fullscreen -> Modifier.fillMaxWidth().height(100.dp)
                         else -> Modifier.fillMaxWidth().height(((configuration.screenWidthDp - 32).dp * 9 / 16).coerceAtMost(230.dp))
                     }.then(if (fullscreen || callView) Modifier else Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(12.dp)))
                     val showMovieCameras = fullscreen && calling.active &&
@@ -441,10 +473,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                                     .pointerInput(id) {
                                         detectTapGestures(onDoubleTap = { expandedCamera = if (expandedCamera == id) null else id })
                                     }
-                                if (peer?.camera == true) CameraTile(peer.name, calling.remoteVideo, peer.online,
-                                    call, false, preview(peer.id))
-                                if (calling.camera || calling.sharing) CameraTile(if (calling.sharing) "Your screen" else "You",
-                                    calling.localVideo, true, call, !calling.sharing, preview("self"))
+                                CameraTile(peer?.name ?: "Partner", calling.remoteVideo, peer?.camera == true && peer.online,
+                                    call, false, preview(peer?.id ?: "partner"), clipVideo = true)
+                                CameraTile(if (calling.sharing) "Your screen" else "You", calling.localVideo,
+                                    calling.camera || calling.sharing, call, !calling.sharing, preview("self"), clipVideo = true)
                             }
                         }
                         val movieShape = RoundedCornerShape(16.dp)
@@ -611,16 +643,6 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                         }
                     }
                 }
-                if (!fullscreen && !callView && tab == "Queue" && calling.active &&
-                    (peer?.camera == true || calling.camera || calling.sharing)) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (peer?.camera == true) CameraTile(peer.name, calling.remoteVideo, peer.online,
-                            call, false, Modifier.weight(1f).heightIn(max = 172.dp).aspectRatio(3f / 4f))
-                        if (calling.camera || calling.sharing) CameraTile(if (calling.sharing) "Your screen" else "You",
-                            calling.localVideo, true, call, !calling.sharing, Modifier.weight(1f).heightIn(max = 172.dp).aspectRatio(3f / 4f))
-                    }
-                }
                 if (!fullscreen && !callView) LazyColumn(Modifier.fillMaxWidth().weight(1f), state = listState,
                     contentPadding = PaddingValues(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (tab == "Chat") {
@@ -638,6 +660,16 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                             }
                         }
                     } else {
+                        if (calling.active && (peer != null || calling.camera || calling.sharing)) item(key = "call-cameras") {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                val tile = Modifier.weight(1f).height(172.dp)
+                                CameraTile(peer?.name ?: "Partner", calling.remoteVideo, peer?.camera == true && peer.online,
+                                    call, false, tile, clipVideo = true)
+                                CameraTile(if (calling.sharing) "Your screen" else "You", calling.localVideo,
+                                    calling.camera || calling.sharing, call, !calling.sharing, tile, clipVideo = true)
+                            }
+                        }
                         if (room.queue.isEmpty()) item { Text("Pick what comes next.", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.bodySmall) }
                         items(room.queue, key = { it.id }) { item ->
                             ListItem(headlineContent = { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(item.kind.uppercase()) },
@@ -691,7 +723,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             if (callView) TogetherCallView(
                 room, calling, call, message, { message = it.take(2000) },
                 ::sendMessage,
-                callChat, { callChat = !callChat }, { if (standalone) endRoom() else session.fullCall(false); callChat = false },
+                callChat, { callChat = !callChat }, { if (calling.active) (context as? TogetherActivity)?.minimizeCall() else session.fullCall(false); callChat = false },
                 { if (standalone) endRoom() else { call.stop(); session.fullCall(false) }; callChat = false },
                 {
                     if (calling.camera) call.camera(false)
@@ -728,7 +760,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             }
         }
     }
-    TogetherPairDialogs(pairing, paired, pairLink, closePairLink, session)
+    TogetherPairDialogs(pairing, paired, activePairLink, { pastedPairLink = null; closePairLink() }, session)
     if (showLeave) AlertDialog(onDismissRequest = { showLeave = false }, title = { Text("Leave your room?") }, text = { Text("Playback pauses for your partner and your call ends.") },
         confirmButton = { TextButton({ call.stop(); session.leave(); showLeave = false }) { Text("Leave room") } }, dismissButton = { TextButton({ showLeave = false }) { Text("Stay") } })
     if (showMedia) MediaChooser(
@@ -958,7 +990,9 @@ private fun TogetherPlayerStatus(room: TogetherState, playback: TogetherPlayback
 }
 
 @Composable
-private fun TogetherLobby(session: TogetherSession, invitation: String, pairing: TogetherPairing, paired: PairState) {
+private fun TogetherLobby(session: TogetherSession, invitation: String, pairing: TogetherPairing, paired: PairState,
+    openPairLink: (PairLink) -> Unit,
+) {
     val state by session.state.collectAsStateWithLifecycle()
     var name by rememberSaveable { mutableStateOf(session.preferences.getString("name", "").orEmpty()) }
     var server by rememberSaveable { mutableStateOf(session.preferences.getString("server", TOGETHER_SERVER).orEmpty()) }
@@ -1025,6 +1059,11 @@ private fun TogetherLobby(session: TogetherSession, invitation: String, pairing:
             if (state.connecting || creatingLink) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Ink)
             else Text(if (!manualRoom) "Create pairing link" else if (joining) "Join private room" else "Create private room")
         }
+        if (!manualRoom) TextButton({
+            val link = PairLink.parse(clipboard.getText()?.text?.trim()?.let(android.net.Uri::parse))
+            if (link?.callSecret != null) openPairLink(link)
+            else pairing.error("Copy the secure pairing link your partner sent first.")
+        }) { Text("Paste a pairing link") }
         TextButton({ manualRoom = !manualRoom }) { Text(if (manualRoom) "Back to pairing" else "Use a one-time watch room") }
     }
 }

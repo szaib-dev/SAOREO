@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
@@ -22,6 +23,11 @@ import kotlinx.coroutines.*
 
 internal const val EXTRA_PAIR_ANSWER = "com.codetic.saoreo.PAIR_ANSWER"
 internal const val EXTRA_SHOW_RING = "com.codetic.saoreo.SHOW_RING"
+
+internal fun togetherCallAlertsAllowed(context: Context): Boolean =
+    context.getSystemService(NotificationManager::class.java).currentInterruptionFilter ==
+        NotificationManager.INTERRUPTION_FILTER_ALL &&
+        context.getSystemService(AudioManager::class.java).ringerMode == AudioManager.RINGER_MODE_NORMAL
 
 class TogetherBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -44,6 +50,10 @@ class TogetherAvailabilityService : Service() {
     override fun onCreate() {
         super.onCreate()
         notifications.createNotificationChannel(NotificationChannel(AVAILABLE, "Together availability", NotificationManager.IMPORTANCE_LOW))
+        notifications.createNotificationChannel(NotificationChannel(SILENT_RING, "Silent Together calls", NotificationManager.IMPORTANCE_LOW).apply {
+            setSound(null, null)
+            enableVibration(false)
+        })
         notifications.createNotificationChannel(NotificationChannel(RING, "Together calls and invites", NotificationManager.IMPORTANCE_HIGH).apply {
             setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                 AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build())
@@ -76,9 +86,10 @@ class TogetherAvailabilityService : Service() {
     }
 
     private fun showRing(ring: PairRing, partner: String) {
+        val quiet = ring.silent || !togetherCallAlertsAllowed(this)
         val decline = PendingIntent.getService(this, 3, Intent(this, javaClass).setAction(DECLINE).putExtra("id", ring.id), pendingFlags)
         val answer = openTogether(4, ring.id)
-        val builder = Notification.Builder(this, RING)
+        val builder = Notification.Builder(this, if (quiet) SILENT_RING else RING)
             .setSmallIcon(R.drawable.ic_app_notification)
             .setContentTitle(ring.kind.title)
             .setContentText(partner)
@@ -86,12 +97,13 @@ class TogetherAvailabilityService : Service() {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentIntent(openTogether(5, showRing = ring.kind != PairKind.WATCH))
             .setTimeoutAfter((ring.until - SystemClock.elapsedRealtime()).coerceAtLeast(1))
+        if (quiet) builder.setGroup(SILENT_RING).setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
         if (ring.kind == PairKind.WATCH) {
             builder.addAction(Notification.Action.Builder(null, "Decline", decline).build())
                 .addAction(Notification.Action.Builder(null, "Accept", answer).build())
         } else {
             builder.setStyle(Notification.CallStyle.forIncomingCall(Person.Builder().setName(partner).setImportant(true).build(), decline, answer))
-            if (Build.VERSION.SDK_INT < 34 || notifications.canUseFullScreenIntent()) {
+            if (!quiet && (Build.VERSION.SDK_INT < 34 || notifications.canUseFullScreenIntent())) {
                 builder.setFullScreenIntent(openTogether(6, showRing = true), true)
             }
         }
@@ -120,6 +132,7 @@ class TogetherAvailabilityService : Service() {
     private companion object {
         const val AVAILABLE = "together-availability"
         const val RING = "together-incoming"
+        const val SILENT_RING = "together-incoming-silent"
         const val STOP = "stop"
         const val DECLINE = "decline"
         const val AVAILABLE_ID = 82

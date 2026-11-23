@@ -1,7 +1,6 @@
 package com.codetic.saoreo
 
 import android.content.Context
-import com.yausername.ffmpeg.FFmpeg
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -29,7 +28,7 @@ internal suspend fun prepareInstagramVideo(context: Context, input: File, requir
         } catch (_: InvalidMediaException) { false }
     }
     if (playable && withContext(Dispatchers.IO) { hasCompleteMp4Boxes(input, allowFragments = false) }) return input
-    withContext(Dispatchers.IO) { FFmpeg.init(context) }
+    withContext(Dispatchers.IO) { FfmpegRuntime.initialize(context) }
     val executable = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
     val libraries = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
     val output = File(input.parentFile, "instagram-normalized.mp4")
@@ -49,7 +48,11 @@ internal suspend fun prepareInstagramVideo(context: Context, input: File, requir
                     try {
                         if (!continuation.isActive) return@thread
                         val process = ProcessBuilder(listOf(executable.absolutePath) + args)
-                            .apply { environment()["LD_LIBRARY_PATH"] = libraries.absolutePath }.redirectErrorStream(true).start()
+                            .apply {
+                                environment()["LD_LIBRARY_PATH"] = listOf(executable.parent, libraries.absolutePath,
+                                    FfmpegRuntime.supportLibraries(context).absolutePath).joinToString(":")
+                            }
+                            .redirectErrorStream(true).start()
                         child.set(process)
                         if (!continuation.isActive) process.destroyForcibly()
                         process.inputStream.use { stream ->

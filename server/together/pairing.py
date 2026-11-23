@@ -154,7 +154,14 @@ class Pairing:
         return web.Response(text=f'''<!doctype html><html lang="en"><meta charset="utf-8">
             <meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair with SAOREO</title>
             <h1>Pair your device</h1><p>Open SAOREO to review and accept the pairing request.</p>
-            <p><a href="{intent}">Open SAOREO</a></p></html>''', content_type='text/html')
+            <p><a id="open" href="{intent}">Open SAOREO</a></p>
+            <script>
+            const secret = location.hash.slice(1);
+            if (/^[A-Za-z0-9_-]{{43}}$/.test(secret)) {{
+                const link = document.getElementById('open');
+                link.href = link.getAttribute('href').replace(';end', ';S.callSecret=' + secret + ';end');
+            }}
+            </script></html>''', content_type='text/html', headers={'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store'})
 
     def online(self, identifier):
         ws = self.sockets.get(identifier)
@@ -191,7 +198,8 @@ class Pairing:
         if tickets:
             self.launches = {member: launch for member, launch in self.launches.items() if launch[0] > timestamp()}
             for member, ticket in zip(participants, tickets):
-                self.launches[member] = (timestamp() + 45_000, dict(type='pairLaunch', id=ring.id, kind=ring.kind, ticket=ticket))
+                self.launches[member] = (timestamp() + 45_000, dict(
+                    type='pairLaunch', id=ring.id, kind=ring.kind.removesuffix('_silent'), ticket=ticket))
         await asyncio.gather(*(self.send(member, dict(type='ringResult', id=ring.id, outcome=outcome)) for member in participants))
         await asyncio.gather(*(self.send_status(member) for member in participants))
         if tickets:
@@ -217,12 +225,12 @@ class Pairing:
             return
         if op == 'ring':
             partner = self.device(identifier)[1]
-            if not partner or not self.online(partner):
-                raise ValueError('Your paired partner is offline')
+            if not partner:
+                raise ValueError('Pair a partner before sending a request')
             if identifier in self.rings or partner in self.rings:
                 raise ValueError('A request is already ringing')
             kind = data.get('kind')
-            if kind not in ('audio', 'video', 'watch'):
+            if kind not in ('audio', 'video', 'watch', 'audio_silent', 'video_silent'):
                 raise ValueError('Unknown request type')
             room = host = None
             if kind == 'watch' and data.get('room'):
