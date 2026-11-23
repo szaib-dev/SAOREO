@@ -1,6 +1,7 @@
 package com.codetic.saoreo
 
 import android.os.SystemClock
+import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -36,6 +37,7 @@ import java.util.Locale
 private val CallAccent = Color(0xFFC2B1FF)
 private val CallGlass = Color(0xBA211E2A)
 private val CallGlassBorder = Color(0x35E4DCFA)
+private enum class CallPanelContent { OPTIONS, AUDIO }
 
 @Composable
 internal fun TogetherCallView(
@@ -43,7 +45,7 @@ internal fun TogetherCallView(
     onMessage: (String) -> Unit, send: () -> Unit, chatOpen: Boolean, toggleChat: () -> Unit,
     onBack: () -> Unit, endCall: () -> Unit, toggleCamera: () -> Unit, modifier: Modifier = Modifier,
     standaloneKind: PairKind? = null,
-    toggleScreenShare: () -> Unit = {}, showAudio: () -> Unit = {},
+    toggleScreenShare: () -> Unit = {},
     connectionNotice: String? = null,
     chatPreviews: List<TogetherChat> = emptyList(),
     openStream: () -> Unit = onBack,
@@ -56,22 +58,25 @@ internal fun TogetherCallView(
     var controlsVisible by rememberSaveable(room.room) { mutableStateOf(true) }
     var previewHidden by rememberSaveable(room.room) { mutableStateOf(false) }
     var localFocused by rememberSaveable(room.room) { mutableStateOf(false) }
-    var menuOpen by remember { mutableStateOf(false) }
+    var panel by remember { mutableStateOf<CallPanelContent?>(null) }
+    BackHandler(enabled = panel != null) {
+        panel = if (panel == CallPanelContent.AUDIO) CallPanelContent.OPTIONS else null
+    }
     var previewX by rememberSaveable(room.room) { mutableFloatStateOf(1f) }
     var previewY by rememberSaveable(room.room) { mutableFloatStateOf(0f) }
     val localMain = localFocused && !previewHidden && localVideoOn && peerVideoOn
     val hasPreview = localVideoOn && !previewHidden
-    val showControls = controlsVisible || chatOpen
+    val showControls = controlsVisible || chatOpen || panel != null
     var touchedAt by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(controlsVisible, chatOpen, menuOpen, touchedAt, calling.mic, calling.camera, calling.sharing) {
-        if (controlsVisible && !chatOpen && !menuOpen) { delay(4000); controlsVisible = false }
+    LaunchedEffect(controlsVisible, chatOpen, panel, touchedAt, calling.mic, calling.camera, calling.sharing) {
+        if (controlsVisible && !chatOpen && panel == null) { delay(4000); controlsVisible = false }
     }
     fun hideOrShowPreview() {
         previewHidden = !previewHidden
         if (previewHidden) localFocused = false
     }
     fun toggleControls() {
-        menuOpen = false
+        panel = null
         touchedAt = SystemClock.elapsedRealtime()
         controlsVisible = !showControls
         if (chatOpen) toggleChat()
@@ -147,9 +152,6 @@ internal fun TogetherCallView(
                             .background(CallGlass).padding(horizontal = 9.dp, vertical = 2.dp)) {
                             Icon(painterResource(R.drawable.ic_call_options), null, Modifier.size(16.dp), tint = Color.White)
                         }
-                        if (previewHeight >= 78.dp) Box(Modifier.align(Alignment.BottomEnd).padding(5.dp)) {
-                            CallAction(R.drawable.ic_call_hide_preview, "Hide self view", ::hideOrShowPreview, size = 44)
-                        }
                     }
                 }
             }
@@ -180,11 +182,29 @@ internal fun TogetherCallView(
                     }
                 }
                 val safeSides = if (chatOpen) WindowInsetsSides.Horizontal else WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
-                Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                val panelHeight = (maxHeight - 94.dp).coerceAtLeast(64.dp)
+                Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().zIndex(3f)
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .88f))))
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(safeSides))
-                    .padding(top = 22.dp, bottom = if (chatOpen) 8.dp else 16.dp),
-                    contentAlignment = Alignment.Center) {
+                    .padding(top = 12.dp, bottom = if (chatOpen) 8.dp else 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val panelModifier = Modifier.widthIn(max = 460.dp).fillMaxWidth()
+                        .padding(horizontal = 12.dp).heightIn(max = panelHeight)
+                    when (panel) {
+                        CallPanelContent.OPTIONS -> TogetherCallOptionsPanel(
+                            calling, previewHidden, localVideoOn, ::hideOrShowPreview,
+                            showAudio = { panel = CallPanelContent.AUDIO },
+                            openStream = { panel = null; openStream() },
+                            shareScreen = { panel = null; toggleScreenShare() },
+                            toggleTorch = { call.torch(!calling.torch) },
+                            hideControls = ::toggleControls, modifier = panelModifier,
+                        )
+                        CallPanelContent.AUDIO -> TogetherCallAudioPanel(
+                            calling, call, close = { panel = null }, modifier = panelModifier,
+                        )
+                        null -> Unit
+                    }
                     Row(Modifier.widthIn(max = 440.dp).fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                         CallAction(if (calling.mic) R.drawable.ic_mic else R.drawable.ic_mic_off,
@@ -194,34 +214,16 @@ internal fun TogetherCallView(
                             if (calling.camera) R.drawable.ic_camera else R.drawable.ic_camera_off,
                             if (calling.camera) "Turn camera off" else "Turn camera on", toggleCamera, enabled = calling.active)
                         CallAction(R.drawable.ic_camera_flip, "Switch camera", {
-                            touchedAt = SystemClock.elapsedRealtime(); call.flip()
+                            touchedAt = SystemClock.elapsedRealtime()
+                            call.flip()
                         }, enabled = calling.active && calling.camera)
-                        CallAction(R.drawable.ic_chat, if (chatOpen) "Close call chat" else "Open call chat", toggleChat, selected = chatOpen)
-                        Box {
-                            CallAction(R.drawable.ic_call_options, "Call options", { menuOpen = !menuOpen }, selected = menuOpen)
-                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false },
-                                shape = RoundedCornerShape(21.dp), containerColor = Color(0xFF24202F),
-                                border = BorderStroke(1.dp, CallGlassBorder)) {
-                                if (localVideoOn) {
-                                    CallMenuItem(if (previewHidden) "Show self view" else "Hide self view",
-                                        if (previewHidden) "See your camera preview" else "Keep your camera on for your partner",
-                                        R.drawable.ic_call_hide_preview) { menuOpen = false; hideOrShowPreview() }
-                                    if (!previewHidden) CallMenuItem("Swap views",
-                                        if (localMain) "Focus on your partner" else "Make yourself the main view",
-                                        R.drawable.ic_call_swap_views) { menuOpen = false; localFocused = !localMain }
-                                }
-                                CallMenuItem("Audio devices", "Speaker, Bluetooth and microphone",
-                                    R.drawable.ic_call_audio_devices, enabled = calling.active) { menuOpen = false; showAudio() }
-                                CallMenuItem(if (calling.sharing) "Stop sharing" else "Share screen", "Share your screen with your partner",
-                                    R.drawable.ic_call_share_screen, enabled = calling.active) { menuOpen = false; toggleScreenShare() }
-                                CallMenuItem(if (calling.torch) "Turn torch off" else "Turn torch on", "Use the phone's flashlight",
-                                    R.drawable.ic_call_torch, enabled = calling.active && calling.hasTorch) {
-                                    touchedAt = SystemClock.elapsedRealtime(); call.torch(!calling.torch)
-                                }
-                                CallMenuItem("Hide controls", "Tap the video to bring them back",
-                                    R.drawable.ic_room_fullscreen, onClick = ::toggleControls)
-                            }
-                        }
+                        CallAction(R.drawable.ic_chat, if (chatOpen) "Close call chat" else "Open call chat", {
+                            panel = null
+                            toggleChat()
+                        }, selected = chatOpen)
+                        CallAction(R.drawable.ic_call_options, "Call options", {
+                            panel = if (panel == CallPanelContent.OPTIONS) null else CallPanelContent.OPTIONS
+                        }, selected = panel == CallPanelContent.OPTIONS)
                         CallAction(R.drawable.ic_call_end, "End call", endCall, destructive = true)
                     }
                 }
@@ -281,7 +283,7 @@ private fun CallAction(
     enabled: Boolean = true, selected: Boolean = false, destructive: Boolean = false, size: Int = 48,
 ) {
     val color = when {
-        destructive -> Color(0xFFE82742)
+        destructive -> Color(0xFFFF2E48)
         selected -> Color(0xFF473765)
         else -> CallGlass
     }
@@ -297,23 +299,4 @@ private fun CallAction(
             Icon(painterResource(icon), description, Modifier.size(if (size < 48) 20.dp else 23.dp))
         }
     }
-}
-
-@Composable
-private fun CallMenuItem(
-    title: String, description: String, @DrawableRes icon: Int, enabled: Boolean = true, onClick: () -> Unit,
-) {
-    DropdownMenuItem(
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(title, style = MaterialTheme.typography.bodyMedium)
-                Text(description, style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFCAC0D9).copy(alpha = if (enabled) 1f else .45f))
-            }
-        },
-        onClick = onClick, enabled = enabled,
-        leadingIcon = { Icon(painterResource(icon), null, Modifier.size(21.dp)) },
-        colors = MenuDefaults.itemColors(textColor = Color.White, leadingIconColor = CallAccent,
-            disabledTextColor = Color.White.copy(alpha = .45f), disabledLeadingIconColor = CallAccent.copy(alpha = .45f)),
-    )
 }

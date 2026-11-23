@@ -136,10 +136,25 @@ class TogetherCallNavigationTest {
                 assertSame(remoteTrack, host.callController.state.value.remoteVideo)
             }
             assertTrue(host.state.value.timeline.target(host.serverNow()) > originalPosition)
-            compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
-            runBlocking { delay(3500) }
+            val activity = compose.activity
+            shell(instrumentation, "input keyevent KEYCODE_HOME")
+            runBlocking {
+                withTimeout(15_000) {
+                    while (withContext(Dispatchers.Main) { activity.hasWindowFocus() && !activity.isInPictureInPictureMode }) {
+                        delay(100)
+                    }
+                }
+                delay(3500)
+            }
             assertEquals("Connected", host.callController.state.value.connection)
-            compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            shell(instrumentation, "am start -n ${activity.packageName}/.TogetherActivity -f 0x20020000")
+            runBlocking {
+                withTimeout(15_000) {
+                    while (withContext(Dispatchers.Main) { !activity.hasWindowFocus() || activity.isInPictureInPictureMode }) {
+                        delay(100)
+                    }
+                }
+            }
             assertSame(remoteTrack, host.callController.state.value.remoteVideo)
             assertTrue(host.state.value.timeline.playing)
         } catch (error: Throwable) {
@@ -158,6 +173,12 @@ class TogetherCallNavigationTest {
                 load(null); deleteEntry(identityName)
             }
         }
+    }
+
+    private fun shell(instrumentation: android.app.Instrumentation, command: String) {
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand(command)
+        ).use { it.readBytes() }
     }
 
     private fun makePlaybackFixture(instrumentation: android.app.Instrumentation, output: File) {

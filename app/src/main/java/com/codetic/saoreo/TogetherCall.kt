@@ -19,7 +19,8 @@ internal data class TogetherCallState(val active: Boolean = false, val mic: Bool
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
     val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
     val torch: Boolean = false, val hasTorch: Boolean = false, val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false,
-    val retryAvailable: Boolean = false, val connectedAtMs: Long = 0L)
+    val retryAvailable: Boolean = false, val connectedAtMs: Long = 0L,
+    val outputDeviceId: Int? = null, val inputDeviceId: Int? = null, val audioDeviceRevision: Int = 0)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
 internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false,
@@ -310,15 +311,20 @@ internal class TogetherCall(private val context: Context, private val session: T
         val device = inputs().firstOrNull { it.id == selectedInput }
         if (device == null) selectedInput = null
         adm.setPreferredInputDevice(device)
-        mutable.value = mutable.value.copy(input = device?.let(::outputName) ?: "System default")
+        mutable.value = mutable.value.copy(input = device?.let(::outputName) ?: "System default", inputDeviceId = device?.id)
     }
     fun refreshOutput() {
         val device = audioManager.communicationDevice
-        mutable.value = mutable.value.copy(output = device?.let(::outputName) ?: "Phone audio")
+        mutable.value = mutable.value.copy(output = device?.let(::outputName) ?: "Phone audio", outputDeviceId = device?.id)
     }
     private val deviceCallback = object : android.media.AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { routeAudio() }
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { routeAudio() }
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { audioDevicesChanged() }
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { audioDevicesChanged() }
+
+        private fun audioDevicesChanged() {
+            routeAudio()
+            mutable.value = mutable.value.copy(audioDeviceRevision = mutable.value.audioDeviceRevision + 1)
+        }
     }
     init { audioManager.registerAudioDeviceCallback(deviceCallback, main) }
 

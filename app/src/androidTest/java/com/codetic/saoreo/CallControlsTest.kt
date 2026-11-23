@@ -9,7 +9,7 @@ import org.junit.Test
 class CallControlsTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
-    @Test fun controlsHideAndScreenSharingLivesInOptions() {
+    @Test fun callPanelsKeepControlsAndMoveSelfViewToOptions() {
         lateinit var session: TogetherSession
         lateinit var call: TogetherCall
         compose.runOnUiThread {
@@ -25,10 +25,18 @@ class CallControlsTest {
         }
         try {
             compose.onNodeWithContentDescription("Switch camera").assertExists()
-            compose.onNodeWithContentDescription("Share screen").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Hide self view").assertDoesNotExist()
+            compose.onNodeWithText("Share screen").assertDoesNotExist()
             compose.onNodeWithContentDescription("Call options").performClick()
-            compose.onNodeWithText("Share screen").assertExists()
-            compose.onNodeWithText("Turn torch on").assertExists()
+            compose.onNodeWithText("Share screen").assertIsDisplayed()
+            compose.onNodeWithText("Flashlight").assertIsDisplayed()
+            compose.onNodeWithText("Hide self view").assertIsOff().performClick().assertIsOn()
+            compose.onNodeWithText("Audio devices").performClick()
+            compose.onNodeWithText("Output").assertIsDisplayed()
+            compose.onNodeWithText("Microphone").assertIsDisplayed()
+            compose.onNodeWithContentDescription("Close audio devices").performClick()
+            compose.onNodeWithText("Microphone").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Call options").performClick()
             compose.onNodeWithText("Hide controls").performClick()
             compose.onNodeWithContentDescription("Call options").assertDoesNotExist()
             compose.onRoot().performTouchInput { click(center) }

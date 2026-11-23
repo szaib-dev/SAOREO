@@ -734,7 +734,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                         permissions.launch(arrayOf(Manifest.permission.CAMERA))
                     }
                 }, Modifier.fillMaxSize(), standaloneKind = room.pairKind.takeIf { standalone },
-                toggleScreenShare = ::toggleScreenShare, showAudio = { showOutput = true },
+                toggleScreenShare = ::toggleScreenShare,
                 connectionNotice = connectionNotice, chatPreviews = chatPreviews, openStream = ::showStream,
             )
             if (!callView && room.media == null) TogetherChatPreviewStack(chatPreviews,
@@ -815,17 +815,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                 .onFailure { session.error("Netflix could not be opened.") }
         }) { Text("Open Netflix") } },
         dismissButton = { TextButton({ showNetflix = false }) { Text("Back") } })
-    if (showOutput) ModalBottomSheet({ showOutput = false }) {
-        Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
-            ListItem(headlineContent = { Text("Audio output") }, supportingContent = { Text(calling.output) })
-            TextButton({ call.output(null) }, Modifier.padding(horizontal = 16.dp)) { Text("Automatic output") }
-            call.devices().forEach { device -> TextButton({ call.output(device) }, Modifier.padding(horizontal = 16.dp)) { Text(TogetherCall.outputName(device)) } }
-            HorizontalDivider()
-            ListItem(headlineContent = { Text("Microphone") }, supportingContent = { Text(calling.input) })
-            TextButton({ call.input(null) }, Modifier.padding(horizontal = 16.dp)) { Text("Automatic microphone") }
-            call.inputs().forEach { device -> TextButton({ call.input(device) }, Modifier.padding(horizontal = 16.dp)) { Text(TogetherCall.outputName(device)) } }
-        }
-        Spacer(Modifier.navigationBarsPadding().height(16.dp))
+    if (showOutput) ModalBottomSheet({ showOutput = false }, dragHandle = null) {
+        TogetherCallAudioPanel(calling, call, close = { showOutput = false },
+            modifier = Modifier.fillMaxWidth().padding(12.dp).heightIn(max = 480.dp))
+        Spacer(Modifier.navigationBarsPadding())
     }
     if (showRoomOptions) ModalBottomSheet({ showRoomOptions = false }) {
         Text("Your room", Modifier.padding(horizontal = 20.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge)
