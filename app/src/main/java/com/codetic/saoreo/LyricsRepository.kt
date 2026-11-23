@@ -27,6 +27,7 @@ internal interface LyricsDao {
     @Query("SELECT * FROM lyrics WHERE song = :id") fun observe(id: String): Flow<CachedLyrics?>
     @Query("SELECT * FROM lyrics WHERE song = :id") suspend fun find(id: String): CachedLyrics?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun save(row: CachedLyrics)
+    @Query("DELETE FROM lyrics WHERE text IS NULL") suspend fun clearUnavailable()
 }
 
 @Database(entities = [CachedLyrics::class], version = 1, exportSchema = false)
@@ -43,6 +44,10 @@ internal class LyricsRepository(private val app: SaoreoApp) {
 
     fun start() {
         scope.launch {
+            if (policy.getInt("matchingVersion", 0) < 2) {
+                dao.clearUnavailable()
+                policy.edit().putInt("matchingVersion", 2).apply()
+            }
             val observed = mutableSetOf<String>()
             app.dao.audio().collect { songs ->
                 for (song in songs) if (song.galleryUri != null && observed.add(song.id)) enqueue(song.id)
@@ -62,32 +67,38 @@ internal class LyricsRepository(private val app: SaoreoApp) {
         val song = app.dao.find(id) ?: return@withContext
         if (song.state != JobState.COMPLETE.name || song.galleryUri == null || !song.mime.orEmpty().startsWith("audio/")) return@withContext
         val cached = dao.find(id)
-        if (cached?.text != null || cached != null && System.currentTimeMillis() - cached.checked < TimeUnit.DAYS.toMillis(7)) return@withContext
+        if (cached?.text != null || cached != null && policy.getInt("matchingVersion", 0) >= 2 &&
+            System.currentTimeMillis() - cached.checked < TimeUnit.HOURS.toMillis(6)) return@withContext
         val query = readMetadata(song)
         if (!song.lyrics.isNullOrBlank()) return@withContext
-        if (query.artist.isBlank() || query.duration <= 0) {
+        if (query.title.length < 4 || query.duration <= 0) {
             dao.save(CachedLyrics(id, query.title, query.artist, query.album, query.duration, null, false, System.currentTimeMillis()))
             return@withContext
         }
-        val exact = request("get", query, true)
-        val candidates = if (exact is JSONObject) listOf(exact) else {
+        val exact = if (query.artist.isNotBlank()) request("get", query, true) else null
+        val candidates = if (exact is JSONObject && lyricsMatch(query, exact.optString("trackName"),
+                exact.optString("artistName"), exact.optString("albumName"), exact.optDouble("duration")) &&
+                exact.optString("syncedLyrics").let { it.isNotBlank() && it != "null" }) listOf(exact) else {
             val results = request("search", query, false) as? JSONArray
-            (0 until (results?.length() ?: 0)).mapNotNull { results?.optJSONObject(it) }
+            listOfNotNull(exact as? JSONObject) + (0 until (results?.length() ?: 0)).mapNotNull { results?.optJSONObject(it) }
         }
         val matches = candidates.filter { row -> lyricsMatch(query, row.optString("trackName"),
             row.optString("artistName"), row.optString("albumName"), row.optDouble("duration")) }
-        val match = matches.sortedByDescending { !it.optString("syncedLyrics").let { s -> s.isBlank() || s == "null" } }.firstOrNull()
+        val match = if (matches.map { normalizedMusicName(it.optString("artistName")) }.distinct().size == 1)
+            matches.sortedByDescending { !it.optString("syncedLyrics").let { s -> s.isBlank() || s == "null" } }.firstOrNull() else null
         val synced = match?.optString("syncedLyrics")?.takeUnless { it.isBlank() || it == "null" }
             ?.takeIf { parseLyrics(it).any { line -> line.time != null } }
         val text = synced ?: match?.optString("plainLyrics")?.takeUnless { it.isBlank() || it == "null" }
-        dao.save(CachedLyrics(id, query.title, query.artist, query.album, query.duration, text,
+        dao.save(CachedLyrics(id, query.title, match?.optString("artistName") ?: query.artist, query.album, query.duration, text,
             synced != null, System.currentTimeMillis(), match?.optLong("id")))
     }
 
     private fun readMetadata(song: Download): LyricsMetadata {
         var title = song.localTitle ?: song.title
         var artist = song.artist
-        var album = song.album
+        // A download's album field can contain the destination playlist name.
+        // Only the file's embedded album is suitable for provider lookup.
+        var album: String? = null
         var duration = song.duration
         runCatching {
             MediaMetadataRetriever().use { reader ->
@@ -106,8 +117,9 @@ internal class LyricsRepository(private val app: SaoreoApp) {
         if (wait > 0) throw IOException("Lyrics provider is cooling down")
         delay(800)
         val url = "https://lrclib.net/api/$path".toHttpUrl().newBuilder()
-            .addQueryParameter("track_name", query.title).addQueryParameter("artist_name", query.artist)
-        query.album?.let { url.addQueryParameter("album_name", it) }
+            .addQueryParameter("track_name", query.title)
+        if (query.artist.isNotBlank()) url.addQueryParameter("artist_name", query.artist)
+        if (exact) query.album?.let { url.addQueryParameter("album_name", it) }
         if (exact) url.addQueryParameter("duration", (query.duration / 1000.0).toString())
         val call = http.newCall(Request.Builder().url(url.build())
             .header("User-Agent", "SAOREO/2.10.1 (https://github.com/szaib-dev/SAOREO)").build())

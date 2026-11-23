@@ -49,7 +49,7 @@ internal fun identifyLyricsMetadata(title: String, artist: String?, album: Strin
         .replace(Regex("(?i)\\s*[\\[(](?:official\\s+)?(?:audio|music video|video|lyric video|lyrics|hd|hq|4k|4k remaster|4k remastered)[\\])]"), "")
         .trim()
     var performer = artist?.trim()?.takeUnless { it.isBlank() || it.equals("Unknown artist", true) || it == "<unknown>" }
-    val parts = clean.split(Regex("\\s+[-–—]\\s+"), limit = 2)
+    val parts = clean.split(Regex("\\s+[-\u2013\u2014]\\s+"), limit = 2)
     if (parts.size == 2 && parts.all { it.isNotBlank() } &&
         (performer == null || normalizedMusicName(parts[0]) == normalizedMusicName(performer))) {
         performer = parts[0]
@@ -59,8 +59,8 @@ internal fun identifyLyricsMetadata(title: String, artist: String?, album: Strin
 }
 
 internal fun lyricsMatch(query: LyricsMetadata, title: String, artist: String, album: String?, seconds: Double): Boolean =
-    query.artist.isNotBlank() && query.duration > 0 && seconds.isFinite() &&
+    query.title.length >= 4 && query.duration > 0 && seconds.isFinite() &&
         normalizedMusicName(query.title) == normalizedMusicName(title) &&
-        normalizedMusicName(query.artist) == normalizedMusicName(artist) &&
+        (query.artist.isBlank() || normalizedMusicName(query.artist) == normalizedMusicName(artist)) &&
         abs(query.duration / 1000.0 - seconds) <= 3.0 &&
         (query.album.isNullOrBlank() || normalizedMusicName(query.album) == normalizedMusicName(album.orEmpty()))

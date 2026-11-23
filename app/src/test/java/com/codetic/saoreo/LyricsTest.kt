@@ -19,12 +19,13 @@ class LyricsTest {
         assertFalse(lyricsMatch(song, "Hello", "Lionel Richie", "25", 295.1))
         assertFalse(lyricsMatch(song, "Hello", "Adele", "25", 310.0))
         assertFalse(lyricsMatch(song, "Hello", "Adele", "Live", 295.1))
-        assertFalse(lyricsMatch(song.copy(artist = ""), "Hello", "Adele", "25", 295.1))
+        assertTrue(lyricsMatch(song.copy(artist = ""), "Hello", "Adele", "25", 295.1))
     }
 
     @Test fun metadataCleanupPreservesVersionAndUserInformation() {
         val song = identifyLyricsMetadata("Rick Astley - Never Gonna Give You Up (Official Music Video).mp3", null, null, 213000)
         assertEquals("Rick Astley", song.artist)
+        assertEquals("Rick Astley", identifyLyricsMetadata("Rick Astley \u2013 Never Gonna Give You Up", null, null, 214000).artist)
         assertEquals("Never Gonna Give You Up", song.title)
         assertEquals("Hello (Live)", identifyLyricsMetadata("Hello (Live)", "Adele", null, 295000).title)
         assertEquals("My title", identifyLyricsMetadata("My title", "Known performer", null, 1000).title)
