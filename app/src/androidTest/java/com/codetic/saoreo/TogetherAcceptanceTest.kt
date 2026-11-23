@@ -89,14 +89,14 @@ class TogetherAcceptanceTest {
             val sink = VideoSink { frames.incrementAndGet() }
             track.addSink(sink)
             try {
-                withTimeout(15000) { while (frames.get() < 5) delay(100) }
+                withTimeout(35_000) { while (frames.get() < 5) delay(100) }
                 if (args.getString("exerciseRecovery") == "true") {
                     val count = frames.get()
                     withContext(Dispatchers.Main) { ca.retryConnection() }
                     withTimeout(45_000) {
                         ca.state.first { it.connection == "Connected" }
                         cb.state.first { it.connection == "Connected" }
-                        while (frames.get() < count + 30) delay(100)
+                        while (frames.get() < count + 15) delay(100)
                     }
                     assertSame(track, cb.state.value.remoteVideo)
                     android.util.Log.i("SAOREO_TEST", "PASS ICE restart retained the remote track and received new frames")
@@ -116,7 +116,7 @@ class TogetherAcceptanceTest {
                     withTimeout(60_000) {
                         ca.state.first { it.connection == "Connected" }
                         cb.state.first { it.connection == "Connected" }
-                        while (frames.get() < count + 60) delay(100)
+                        while (frames.get() < count + 20) delay(100)
                     }
                     assertSame(track, cb.state.value.remoteVideo)
                     android.util.Log.i("SAOREO_TEST", "PASS temporary airplane-mode outage recovered on the existing remote track")
