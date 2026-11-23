@@ -37,8 +37,9 @@ internal class CallVideoQuality {
             }
         } else {
             stressedSamples = 0
+            // Frame pacing can inflate RTP jitter even on a healthy low-RTT path.
             val clear = estimate != null && (stats.loss ?: 0.0) < 0.025 &&
-                (stats.rttMs ?: 0.0) < 320 && (stats.jitterMs ?: 0.0) < 30 && !stats.encoderLimited
+                (stats.rttMs ?: 0.0) < 320 && !stats.encoderLimited
             if (target > level && clear) {
                 if (++stableSamples >= if (level == 3) 10 else 4) {
                     level++

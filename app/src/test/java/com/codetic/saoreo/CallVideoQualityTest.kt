@@ -5,7 +5,7 @@ import org.junit.Test
 
 class CallVideoQualityTest {
     private fun sample(bps: Double?, loss: Double = 0.0, tcp: Boolean = false) =
-        CallNetworkStats(90.0, loss, 5.0, bps, false, tcp, "")
+        CallNetworkStats(90.0, loss, 55.0, bps, false, tcp, "")
 
     @Test fun reducesVideoAfterSustainedLossAndClimbsAfterRecovery() {
         val quality = CallVideoQuality()
