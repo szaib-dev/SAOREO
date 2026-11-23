@@ -137,7 +137,10 @@ class TogetherCallNavigationTest {
             }
             assertTrue(host.state.value.timeline.target(host.serverNow()) > originalPosition)
             val activity = compose.activity
-            shell(instrumentation, "input keyevent KEYCODE_HOME")
+            instrumentation.runOnMainSync {
+                activity.startActivity(android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NO_USER_ACTION))
+            }
             runBlocking {
                 withTimeout(15_000) {
                     while (withContext(Dispatchers.Main) { activity.hasWindowFocus() && !activity.isInPictureInPictureMode }) {
@@ -147,7 +150,7 @@ class TogetherCallNavigationTest {
                 delay(3500)
             }
             assertEquals("Connected", host.callController.state.value.connection)
-            shell(instrumentation, "am start -n ${activity.packageName}/.TogetherActivity -f 0x20020000")
+            shell(instrumentation, "input keyevent 4")
             runBlocking {
                 withTimeout(15_000) {
                     while (withContext(Dispatchers.Main) { !activity.hasWindowFocus() || activity.isInPictureInPictureMode }) {
