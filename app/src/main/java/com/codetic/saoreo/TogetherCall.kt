@@ -62,6 +62,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     private var waitForCallFlagsUntil = 0L
     private val checkCallFlags = Runnable { members(session.state.value) }
     private var recoveryAttempts = 0
+    private var recoveryStarted = 0L
     private var recovering = false
     private var wasConnected = false
     private var checkedNetwork: Network? = null
@@ -157,6 +158,7 @@ internal class TogetherCall(private val context: Context, private val session: T
             // Emulator synthetic cellular handles reject bindSocket and can replace a working Wi-Fi pair.
             // Physical devices retain native network monitoring and continual ICE gathering.
             disableNetworkMonitor = emulator
+            networkIgnoreMask = networkIgnoreMask or PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK
         }).setAudioDeviceModule(adm)
             .setVideoEncoderFactory(preferredEncoderFactory)
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext)).createPeerConnectionFactory()
@@ -419,6 +421,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         val config = PeerConnection.RTCConfiguration(servers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            turnPortPrunePolicy = PeerConnection.PortPrunePolicy.PRUNE_BASED_ON_PRIORITY
             if (forceRelay) iceTransportsType = PeerConnection.IceTransportsType.RELAY
         }
         val run = peerGeneration
@@ -447,6 +450,9 @@ internal class TogetherCall(private val context: Context, private val session: T
                         else -> Unit
                     }
                 }
+            }
+            override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
+                main.post { if (run == peerGeneration && !closed && mediaConnected()) connected() }
             }
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onIceCandidate(candidate: IceCandidate) {
@@ -505,6 +511,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         wasConnected = true
         recovering = false
         recoveryAttempts = 0
+        recoveryStarted = 0L
         main.removeCallbacks(recover)
         mutable.value = mutable.value.copy(connection = "Connected", retryAvailable = false,
             connectedAtMs = mutable.value.connectedAtMs.takeIf { it > 0 } ?: android.os.SystemClock.elapsedRealtime())
@@ -513,6 +520,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     fun retryConnection() {
         if (!mutable.value.active || peer == null) return
         recoveryAttempts = 0
+        recoveryStarted = 0L
         recovering = false
         mutable.value = mutable.value.copy(retryAvailable = false)
         scheduleRecovery(0)
@@ -521,6 +529,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     private fun scheduleRecovery(delayMs: Long = 2500) {
         if (peer == null || mutable.value.retryAvailable) return
         val starting = !recovering
+        if (starting) recoveryStarted = android.os.SystemClock.elapsedRealtime()
         recovering = true
         mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
         if (!main.hasCallbacks(recover) || starting) {
@@ -532,22 +541,26 @@ internal class TogetherCall(private val context: Context, private val session: T
     private fun recoveryStep() {
         val pc = peer ?: return
         if (mediaConnected() && !recovering) { connected(); return }
-        if (recoveryAttempts >= recoveryBackoff.size) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (recoveryStarted == 0L) recoveryStarted = now
+        if (recoveryAttempts >= recoveryBackoff.size || now - recoveryStarted >= 75_000) {
             recovering = false
             mutable.value = mutable.value.copy(connection = "Connection unavailable", retryAvailable = true)
             return
         }
         recovering = true
         mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
+        if (!session.state.value.connected || !signalingOnline) {
+            main.postDelayed(recover, 2000)
+            return
+        }
         val delayMs = recoveryBackoff[recoveryAttempts++]
-        if (session.state.value.connected && signalingOnline) {
-            if (offerer) {
-                if (pc.signalingState() == PeerConnection.SignalingState.STABLE && !negotiating) createOffer(restart = true)
-                else resendDescription()
-            } else {
-                sendAuthenticated(JSONObject().put("type", "restartRequest"))
-                resendDescription()
-            }
+        if (offerer) {
+            if (pc.signalingState() == PeerConnection.SignalingState.STABLE && !negotiating) createOffer(restart = true)
+            else resendDescription()
+        } else {
+            sendAuthenticated(JSONObject().put("type", "restartRequest"))
+            resendDescription()
         }
         main.postDelayed(recover, delayMs)
     }
@@ -721,7 +734,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         peerGeneration++; peer?.close(); peer?.dispose(); peer = null; remoteId = null
         negotiationId = null; negotiating = false; hasRemoteDescription = false
         remoteSdp = null; localSdp = null; remoteCandidates.clear(); localCandidates.clear()
-        signalingOnline = false; recovering = false; wasConnected = false; recoveryAttempts = 0
+        signalingOnline = false; recovering = false; wasConnected = false; recoveryAttempts = 0; recoveryStarted = 0L
         statsSampler = CallStatsSampler(); lastDiagnostics = null
         mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false, retryAvailable = false, connectedAtMs = 0L)
     }
