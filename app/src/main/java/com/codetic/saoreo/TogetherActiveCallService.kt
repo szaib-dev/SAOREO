@@ -43,7 +43,7 @@ class TogetherActiveCallService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, TogetherActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP), flags)
         val hangup = PendingIntent.getService(this, 1, Intent(this, javaClass).setAction("hangup"), flags)
-        val notice = Notification.Builder(this, channel).setSmallIcon(R.drawable.ic_app_notification)
+        val notice = Notification.Builder(this, channel).setSmallIcon(R.drawable.ic_call_ongoing_notification)
             .setContentTitle(if (sharing) "Sharing your screen" else "Together call in progress")
             .setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_CALL)
             .addAction(Notification.Action.Builder(null, "End call", hangup).build()).build()

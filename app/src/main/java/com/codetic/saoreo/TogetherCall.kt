@@ -5,6 +5,8 @@ import android.content.Intent
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.projection.MediaProjection
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,7 +18,8 @@ import org.webrtc.audio.JavaAudioDeviceModule
 internal data class TogetherCallState(val active: Boolean = false, val mic: Boolean = false, val camera: Boolean = false,
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
     val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
-    val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false)
+    val torch: Boolean = false, val hasTorch: Boolean = false, val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false,
+    val retryAvailable: Boolean = false, val connectedAtMs: Long = 0L)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
 internal class TogetherCall(private val context: Context, private val session: TogetherSession, private val forceRelay: Boolean = false,
@@ -46,9 +49,73 @@ internal class TogetherCall(private val context: Context, private val session: T
     private var peer: PeerConnection? = null
     private var remoteId: String? = null
     private var closed = false
+    private var offerer = false
+    private var negotiationId: String? = null
+    private var negotiating = false
+    private var remoteSdp: String? = null
+    private var localSdp: JSONObject? = null
+    private val remoteCandidates = mutableListOf<IceCandidate>()
+    private val localCandidates = mutableListOf<JSONObject>()
     private var hasRemoteDescription = false
-    private var offerStarted = false
-    private val candidates = mutableListOf<IceCandidate>()
+    private var signalingOnline = false
+    private var callFlagsMayBeStale = false
+    private var waitForCallFlagsUntil = 0L
+    private val checkCallFlags = Runnable { members(session.state.value) }
+    private var recoveryAttempts = 0
+    private var recovering = false
+    private var wasConnected = false
+    private var checkedNetwork: Network? = null
+    private var monitoringNetwork = false
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    private val recover = Runnable { recoveryStep() }
+    private val networkChanged = Runnable {
+        if (mutable.value.active) {
+            session.checkSignaling()
+            if (peer != null && !mediaConnected()) scheduleRecovery(0)
+        }
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            main.post {
+                if (!monitoringNetwork) return@post
+                if (checkedNetwork != null && checkedNetwork != network) {
+                    main.removeCallbacks(networkChanged)
+                    main.postDelayed(networkChanged, 1500)
+                }
+                checkedNetwork = network
+            }
+        }
+    }
+    private var statsSampler = CallStatsSampler()
+    private var videoQuality = CallVideoQuality()
+    private var profile = CallVideoProfile.levels[3]
+    private var captureHeight = 720
+    private var fullHdCamera = false
+    private var lastDiagnostics: String? = null
+    private val sampleStats = object : Runnable {
+        override fun run() {
+            val pc = peer ?: return
+            val run = peerGeneration
+            pc.getStats { report -> main.post {
+                if (run != peerGeneration || closed) return@post
+                val stats = statsSampler.read(report)
+                lastDiagnostics = stats.diagnostic
+                if (recovering && recoveryAttempts > 0 && !negotiating && mediaConnected()) connected()
+                if (mutable.value.camera && mediaConnected()) {
+                    val next = videoQuality.update(stats, fullHdCamera)
+                    if (next != profile) {
+                        profile = next
+                        if (next.height > captureHeight) {
+                            capturer?.changeCaptureFormat(1920, 1080, 30)
+                            captureHeight = 1080
+                        }
+                        configureVideoSender()
+                    }
+                }
+            } }
+            main.postDelayed(this, 2000)
+        }
+    }
     private var peerGeneration = 0
     private var authentication: CallAuthentication? = null
     private var authenticatingRoom: String? = null
@@ -80,12 +147,18 @@ internal class TogetherCall(private val context: Context, private val session: T
         adm = JavaAudioDeviceModule.builder(context).setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true).createAudioDeviceModule()
         val emulator = android.os.Build.FINGERPRINT.contains("generic") || android.os.Build.MODEL.contains("sdk_gphone")
+        val encoderFactory = DefaultVideoEncoderFactory(egl.eglBaseContext, true, true)
+        val hardwareCodecs = HardwareVideoEncoderFactory(egl.eglBaseContext, true, true).supportedCodecs.toSet()
+        val preferredEncoderFactory = object : VideoEncoderFactory by encoderFactory {
+            override fun getSupportedCodecs(): Array<VideoCodecInfo> =
+                encoderFactory.supportedCodecs.sortedBy { it !in hardwareCodecs }.toTypedArray()
+        }
         factory = PeerConnectionFactory.builder().setOptions(PeerConnectionFactory.Options().apply {
             // Emulator synthetic cellular handles reject bindSocket and can replace a working Wi-Fi pair.
             // Physical devices retain native network monitoring and continual ICE gathering.
             disableNetworkMonitor = emulator
         }).setAudioDeviceModule(adm)
-            .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
+            .setVideoEncoderFactory(preferredEncoderFactory)
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext)).createPeerConnectionFactory()
         audioSource = factory.createAudioSource(MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
@@ -97,6 +170,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         mutable.value = mutable.value.copy(localVideo = videoTrack)
         session.onSignal = ::signal
         session.onConnectionLost = ::networkLost
+        session.callOnReconnect = { mutable.value.active }
     }
 
     fun start(camera: Boolean) {
@@ -106,6 +180,10 @@ internal class TogetherCall(private val context: Context, private val session: T
         mutable.value = mutable.value.copy(active = true, mic = true, connection = "Waiting for your partner", error = null)
         audioTrack.setEnabled(true)
         if (camera) camera(true)
+        if (!monitoringNetwork) {
+            checkedNetwork = connectivity.activeNetwork
+            monitoringNetwork = runCatching { connectivity.registerDefaultNetworkCallback(networkCallback) }.isSuccess
+        }
         announce()
         members(session.state.value)
         routeAudio()
@@ -121,7 +199,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         announce()
     }
     fun camera(enabled: Boolean) {
-        if (!mutable.value.active) return
+        if (enabled && !mutable.value.active) return
         if (enabled && mutable.value.sharing) stopScreenShare()
         try {
             if (enabled && capturer == null) {
@@ -131,7 +209,14 @@ internal class TogetherCall(private val context: Context, private val session: T
                 capturer = enumerator.createCapturer(name, null) ?: error("Camera could not be opened")
                 texture = SurfaceTextureHelper.create("SAOREO-camera", egl.eglBaseContext)
                 capturer!!.initialize(texture, context, videoSource.capturerObserver)
-                capturer!!.startCapture(640, 360, 20)
+                fullHdCamera = enumerator.getSupportedFormats(name).orEmpty().any {
+                    maxOf(it.width, it.height) >= 1920 && minOf(it.width, it.height) >= 1080 && it.framerate.max >= 30_000
+                }
+                captureHeight = 720
+                videoQuality = CallVideoQuality()
+                profile = CallVideoProfile.levels[3]
+                capturer!!.startCapture(1280, captureHeight, 30)
+                configureVideoSender()
             } else if (!enabled && capturer != null) {
                 capturer?.stopCapture(); capturer?.dispose(); capturer = null
                 texture?.dispose(); texture = null
@@ -144,7 +229,54 @@ internal class TogetherCall(private val context: Context, private val session: T
         }
         announce()
     }
-    fun flip() { capturer?.switchCamera(null) }
+    private val cameraManager = context.getSystemService(android.hardware.camera2.CameraManager::class.java)
+    private val torchId = runCatching { cameraManager.cameraIdList.firstOrNull {
+        cameraManager.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+    } }.getOrNull()
+    private val torchCallback = object : android.hardware.camera2.CameraManager.TorchCallback() {
+        override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
+            if (!closed && cameraId == torchId) mutable.value = mutable.value.copy(torch = enabled)
+        }
+        override fun onTorchModeUnavailable(cameraId: String) {
+            if (!closed && cameraId == torchId) mutable.value = mutable.value.copy(torch = false)
+        }
+    }
+    init {
+        mutable.value = mutable.value.copy(hasTorch = torchId != null)
+        cameraManager.registerTorchCallback(torchCallback, main)
+    }
+    fun torch(enabled: Boolean) {
+        val id = torchId ?: return
+        runCatching { cameraManager.setTorchMode(id, enabled) }
+            .onSuccess { mutable.value = mutable.value.copy(torch = enabled) }
+            .onFailure { if (enabled) reportError("Torch is unavailable while this camera is in use. Try the front camera.") }
+    }
+    fun flip() {
+        torch(false)
+        val camera = capturer ?: return
+        camera.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                main.post {
+                    if (capturer !== camera || closed) return@post
+                    val enumerator = Camera2Enumerator(context)
+                    val names = enumerator.deviceNames.filter { enumerator.isFrontFacing(it) == isFrontCamera }
+                    fullHdCamera = names.size == 1 && enumerator.getSupportedFormats(names.single()).orEmpty().any {
+                        maxOf(it.width, it.height) >= 1920 && minOf(it.width, it.height) >= 1080 && it.framerate.max >= 30_000
+                    }
+                    if (!fullHdCamera && captureHeight > 720) {
+                        captureHeight = 720
+                        profile = CallVideoProfile.levels[3]
+                        videoQuality = CallVideoQuality()
+                        camera.changeCaptureFormat(1280, 720, 30)
+                        configureVideoSender()
+                    }
+                }
+            }
+            override fun onCameraSwitchError(errorDescription: String) {
+                main.post { if (!closed) reportError(errorDescription) }
+            }
+        })
+    }
     fun devices(): List<AudioDeviceInfo> = audioManager.availableCommunicationDevices
     fun inputs(): List<AudioDeviceInfo> = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).filter {
         it.type in setOf(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
@@ -199,18 +331,40 @@ internal class TogetherCall(private val context: Context, private val session: T
     fun members(room: TogetherState) {
         if (closed) return
         val me = room.members.firstOrNull { it.id == room.member }
-        val other = room.members.firstOrNull { it.id != room.member && it.online && it.call }
-        if (!room.connected) return
-        if (mutable.value.active && me?.call == false) {
-            if (authentication != null || peer != null) resetAuthentication()
+        val other = room.members.firstOrNull { it.id != room.member }
+        if (!room.connected || !mutable.value.active) return
+        if (me?.call == false) {
             announce()
             return
         }
-        if (!mutable.value.active || other == null) {
-            if (authentication != null || peer != null) resetAuthentication()
-            if (mutable.value.active) mutable.value = mutable.value.copy(connection = "Waiting for your partner")
+        if (other?.online == false) {
+            signalingOnline = false
+            callFlagsMayBeStale = true
+            if (peer != null && !mediaConnected()) scheduleRecovery()
             return
         }
+        if (callFlagsMayBeStale) {
+            callFlagsMayBeStale = false
+            waitForCallFlagsUntil = android.os.SystemClock.elapsedRealtime() + 7000
+        }
+        if (other?.call == false && peer != null) {
+            val remaining = waitForCallFlagsUntil - android.os.SystemClock.elapsedRealtime()
+            if (remaining > 0) {
+                main.removeCallbacks(checkCallFlags)
+                main.postDelayed(checkCallFlags, remaining)
+                return
+            }
+        }
+        if (other == null || !other.call) {
+            val ended = peer != null && wasConnected
+            if (authentication != null || peer != null) resetAuthentication()
+            if (ended || mutable.value.connection != "Partner ended the call") {
+                mutable.value = mutable.value.copy(connection = if (ended) "Partner ended the call" else "Waiting for your partner")
+            }
+            return
+        }
+        main.removeCallbacks(checkCallFlags)
+        waitForCallFlagsUntil = 0
         if (authenticatingRoom != room.room || authenticatingPeer != other.id || authenticatingRoomSecret != session.roomCallSecret) {
             resetAuthentication()
             val roomSecret = session.roomCallSecret
@@ -237,21 +391,24 @@ internal class TogetherCall(private val context: Context, private val session: T
             retryAuthentication.run()
         }
         if (authentication?.ready != true) return
+        val signalingRestored = !signalingOnline
         if (remoteId != other.id || peer == null) {
-            createPeer(other.id)
-            announceScreenShare()
+            createPeer(other.id, me?.ordinal == 0)
         }
-        if (me?.ordinal == 0 && !offerStarted) {
-            offerStarted = true
-            val run = peerGeneration
-            peer?.createOffer(sdpObserver(onCreated = { description ->
-                if (run == peerGeneration) localDescription(description)
-            }), MediaConstraints())
+        signalingOnline = true
+        if (offerer && negotiationId == null && !negotiating) createOffer(restart = false)
+        if (signalingRestored) {
+            resendDescription()
+            announceScreenShare()
+            background(inBackground)
+            if (recovering) scheduleRecovery(0)
         }
     }
-    private fun createPeer(id: String) {
+
+    private fun createPeer(id: String, initiatesOffers: Boolean) {
         disposePeer()
         remoteId = id
+        offerer = initiatesOffers
         val servers = session.iceServers.objects().map { obj ->
             val urls = obj.getJSONArray("urls").let { a -> (0 until a.length()).map(a::getString) }
             PeerConnection.IceServer.builder(urls).setUsername(obj.optString("username"))
@@ -268,29 +425,36 @@ internal class TogetherCall(private val context: Context, private val session: T
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
                 main.post {
                     if (run != peerGeneration || closed) return@post
-                    mutable.value = mutable.value.copy(connection = when (state) {
+                    when (state) {
+                        PeerConnection.IceConnectionState.FAILED -> scheduleRecovery(0)
+                        PeerConnection.IceConnectionState.DISCONNECTED -> scheduleRecovery()
                         PeerConnection.IceConnectionState.CONNECTED, PeerConnection.IceConnectionState.COMPLETED ->
-                            if (mutable.value.connection == "Connected") "Connected" else "Establishing encrypted call"
-                        PeerConnection.IceConnectionState.FAILED -> "Connection failed - reconnect call"
-                        PeerConnection.IceConnectionState.DISCONNECTED -> "Reconnecting call"
-                        else -> "Connecting call"
-                    })
-                    if (state == PeerConnection.IceConnectionState.FAILED) {
-                        mutable.value = mutable.value.copy(error = "Call connection failed. End and rejoin the call.")
+                            if (mediaConnected()) connected()
+                        else -> Unit
                     }
                 }
             }
             override fun onIceConnectionReceivingChange(receiving: Boolean) {}
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
                 main.post {
-                    if (run == peerGeneration && !closed && state == PeerConnection.PeerConnectionState.CONNECTED)
-                        mutable.value = mutable.value.copy(connection = "Connected")
+                    if (run != peerGeneration || closed) return@post
+                    when (state) {
+                        PeerConnection.PeerConnectionState.CONNECTED -> if (mediaConnected()) connected()
+                        PeerConnection.PeerConnectionState.DISCONNECTED -> scheduleRecovery()
+                        PeerConnection.PeerConnectionState.FAILED -> scheduleRecovery(0)
+                        else -> Unit
+                    }
                 }
             }
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onIceCandidate(candidate: IceCandidate) {
-                main.post { if (run == peerGeneration) sendAuthenticated(JSONObject()
-                    .put("type", "candidate").put("candidate", candidate.sdp).put("mid", candidate.sdpMid).put("line", candidate.sdpMLineIndex)) }
+                main.post {
+                    if (run != peerGeneration || closed || localCandidates.size >= 128) return@post
+                    val payload = JSONObject().put("type", "candidate").put("candidate", candidate.sdp)
+                        .put("mid", candidate.sdpMid).put("line", candidate.sdpMLineIndex).put("negotiation", negotiationId)
+                    localCandidates.add(payload)
+                    if (localSdp != null) sendAuthenticated(payload)
+                }
             }
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
             override fun onAddStream(stream: MediaStream) {}
@@ -303,25 +467,109 @@ internal class TogetherCall(private val context: Context, private val session: T
             }
         }) ?: error("Unable to create call connection")
         peer?.addTrack(audioTrack, listOf("saoreo-call"))
-        val sender = peer?.addTrack(screenTrack ?: videoTrack, listOf("saoreo-call"))
-        videoSender = sender
-        // Cap camera bitrate; the watched video never goes through this connection.
-        sender?.let {
-            val params = sender.parameters
-            params.encodings.forEach { it.maxBitrateBps = 650_000; it.maxFramerate = 20 }
-            sender.setParameters(params)
+        videoSender = peer?.addTrack(screenTrack ?: videoTrack, listOf("saoreo-call"))
+        configureVideoSender()
+        mutable.value = mutable.value.copy(connection = "Connecting call", error = null, retryAvailable = false)
+        main.post(sampleStats)
+        // Also cover initial setup where signaling or ICE stalls without emitting FAILED.
+        main.postDelayed(recover, 15_000)
+    }
+
+    private fun configureVideoSender() {
+        val sender = videoSender ?: return
+        val params = sender.parameters
+        val sharing = screenTrack != null
+        params.degradationPreference = if (sharing) RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
+            else RtpParameters.DegradationPreference.BALANCED
+        params.encodings.forEach {
+            it.maxBitrateBps = if (sharing) 2_500_000 else if (captureHeight > 720) 4_000_000 else 2_500_000
+            it.maxFramerate = if (sharing) 15 else profile.fps
+            it.scaleResolutionDownBy = if (sharing) 1.0 else (captureHeight.toDouble() / profile.height).coerceAtLeast(1.0)
         }
-        mutable.value = mutable.value.copy(connection = "Connecting call", error = null)
+        if (!sender.setParameters(params)) android.util.Log.w("TogetherCall", "Unable to apply video sender limits")
     }
 
     internal fun diagnostics(callback: (String) -> Unit) {
-        peer?.getStats { report ->
-            if (closed) return@getStats
-            val stats = report.statsMap.values.filter { it.type in setOf("inbound-rtp", "outbound-rtp", "transport") }.map { stat ->
-                stat.type + ":" + stat.members.filterKeys { it in setOf("kind", "mediaType", "framesEncoded", "framesDecoded", "bytesSent", "bytesReceived", "dtlsState", "packetsReceived", "packetsSent") }
-            }
-            callback("camera=${mutable.value.camera}, enabled=${videoTrack.enabled()}, " + stats.joinToString("; "))
+        lastDiagnostics?.let(callback)
+    }
+
+    private fun mediaConnected(): Boolean = peer?.let {
+        it.connectionState() == PeerConnection.PeerConnectionState.CONNECTED &&
+            it.iceConnectionState() in setOf(PeerConnection.IceConnectionState.CONNECTED, PeerConnection.IceConnectionState.COMPLETED)
+    } == true
+
+    private fun connected() {
+        if (negotiating || recovering && offerer && peer?.signalingState() != PeerConnection.SignalingState.STABLE) return
+        wasConnected = true
+        recovering = false
+        recoveryAttempts = 0
+        main.removeCallbacks(recover)
+        mutable.value = mutable.value.copy(connection = "Connected", retryAvailable = false,
+            connectedAtMs = mutable.value.connectedAtMs.takeIf { it > 0 } ?: android.os.SystemClock.elapsedRealtime())
+    }
+
+    fun retryConnection() {
+        if (!mutable.value.active || peer == null) return
+        recoveryAttempts = 0
+        recovering = false
+        mutable.value = mutable.value.copy(retryAvailable = false)
+        scheduleRecovery(0)
+    }
+
+    private fun scheduleRecovery(delayMs: Long = 2500) {
+        if (peer == null || mutable.value.retryAvailable) return
+        val starting = !recovering
+        recovering = true
+        mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
+        if (!main.hasCallbacks(recover) || starting) {
+            main.removeCallbacks(recover)
+            main.postDelayed(recover, delayMs)
         }
+    }
+
+    private fun recoveryStep() {
+        val pc = peer ?: return
+        if (mediaConnected() && !recovering) { connected(); return }
+        if (recoveryAttempts >= recoveryBackoff.size) {
+            recovering = false
+            mutable.value = mutable.value.copy(connection = "Connection unavailable", retryAvailable = true)
+            return
+        }
+        recovering = true
+        mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
+        val delayMs = recoveryBackoff[recoveryAttempts++]
+        if (session.state.value.connected && signalingOnline) {
+            if (offerer) {
+                if (pc.signalingState() == PeerConnection.SignalingState.STABLE && !negotiating) createOffer(restart = true)
+                else resendDescription()
+            } else {
+                sendAuthenticated(JSONObject().put("type", "restartRequest"))
+                resendDescription()
+            }
+        }
+        main.postDelayed(recover, delayMs)
+    }
+
+    private fun beginDescription(id: String?) {
+        negotiationId = id
+        negotiating = true
+        hasRemoteDescription = false
+        remoteSdp = null
+        localSdp = null
+        localCandidates.clear()
+        remoteCandidates.clear()
+    }
+
+    private fun createOffer(restart: Boolean) {
+        val pc = peer ?: return
+        beginDescription(java.util.UUID.randomUUID().toString())
+        if (restart) pc.restartIce()
+        pc.createOffer(sdpObserver(onCreated = ::localDescription), MediaConstraints())
+    }
+
+    private fun resendDescription() {
+        val description = localSdp ?: return
+        if (sendAuthenticated(description)) localCandidates.forEach(::sendAuthenticated)
     }
 
     private fun signal(data: JSONObject) {
@@ -353,47 +601,78 @@ internal class TogetherCall(private val context: Context, private val session: T
         }
         val payload = exchange.open(data) ?: return
         val pc = peer ?: return
-        val run = peerGeneration
         when (payload.optString("type")) {
             "screenShare" -> mutable.value = mutable.value.copy(remoteSharing = payload.optBoolean("enabled"))
             "background" -> mutable.value = mutable.value.copy(remoteBackground = payload.optBoolean("enabled"))
+            "hangup" -> {
+                resetAuthentication()
+                mutable.value = mutable.value.copy(connection = "Partner ended the call")
+            }
+            "restartRequest" -> {
+                if (offerer && mutable.value.retryAvailable) retryConnection()
+                else if (offerer && !recovering) scheduleRecovery(0)
+                else if (offerer) resendDescription()
+            }
             "offer", "answer" -> {
-                val type = SessionDescription.Type.fromCanonicalForm(payload.getString("type"))
-                val description = payload.getString("sdp")
-                if (!secureFingerprint.containsMatchIn(description)) return
+                val offer = payload.optString("type") == "offer"
+                val description = payload.optString("sdp")
+                val id = payload.optString("negotiation").takeIf { it.isNotEmpty() }
+                if (!secureFingerprint.containsMatchIn(description) || offer == offerer) return
+                if (offer && description == remoteSdp) {
+                    resendDescription()
+                    return
+                }
+                if (offer) {
+                    if (pc.signalingState() != PeerConnection.SignalingState.STABLE || negotiating) return
+                    beginDescription(id)
+                } else if (pc.signalingState() != PeerConnection.SignalingState.HAVE_LOCAL_OFFER ||
+                    id != null && id != negotiationId || description == remoteSdp) return
+                remoteSdp = description
                 pc.setRemoteDescription(sdpObserver(onSet = {
-                    if (run == peerGeneration) {
-                        hasRemoteDescription = true
-                        candidates.toList().forEach { pc.addIceCandidate(it) }; candidates.clear()
-                        if (type == SessionDescription.Type.OFFER) pc.createAnswer(sdpObserver(onCreated = { if (run == peerGeneration) localDescription(it) }), MediaConstraints())
+                    hasRemoteDescription = true
+                    remoteCandidates.forEach { pc.addIceCandidate(it) }
+                    remoteCandidates.clear()
+                    if (offer) pc.createAnswer(sdpObserver(onCreated = ::localDescription), MediaConstraints())
+                    else {
+                        negotiating = false
+                        if (mediaConnected()) connected()
                     }
-                }), SessionDescription(type, description))
+                }), SessionDescription(if (offer) SessionDescription.Type.OFFER else SessionDescription.Type.ANSWER, description))
             }
             "candidate" -> {
-                val c = IceCandidate(payload.optString("mid"), payload.getInt("line"), payload.getString("candidate"))
-                if (hasRemoteDescription) pc.addIceCandidate(c) else if (candidates.size < 128) candidates.add(c)
+                val id = payload.optString("negotiation")
+                if (id.isNotEmpty() && id != negotiationId) return
+                val candidate = IceCandidate(payload.optString("mid"), payload.getInt("line"), payload.getString("candidate"))
+                if (hasRemoteDescription) pc.addIceCandidate(candidate)
+                else if (remoteCandidates.size < 128) remoteCandidates.add(candidate)
             }
         }
     }
+
     private fun localDescription(description: SessionDescription) {
         if (!secureFingerprint.containsMatchIn(description.description)) {
             stop()
             reportError("The call cannot negotiate a SHA-256 media fingerprint.")
             return
         }
-        val run = peerGeneration
         peer?.setLocalDescription(sdpObserver(onSet = {
-            if (run == peerGeneration) sendAuthenticated(JSONObject()
-                .put("type", description.type.canonicalForm()).put("sdp", description.description))
+            localSdp = JSONObject().put("type", description.type.canonicalForm())
+                .put("sdp", description.description).put("negotiation", negotiationId)
+            resendDescription()
+            if (description.type == SessionDescription.Type.ANSWER) {
+                negotiating = false
+                if (mediaConnected()) connected()
+            }
         }), description)
     }
     private fun sendSignal(payload: JSONObject) = session.send("signal", JSONObject().put("payload", payload))
 
-    private fun sendAuthenticated(payload: JSONObject) {
-        val exchange = authentication?.takeIf { it.ready } ?: return
-        runCatching { sendSignal(exchange.seal(payload)) }.onFailure {
+    private fun sendAuthenticated(payload: JSONObject): Boolean {
+        val exchange = authentication?.takeIf { it.ready } ?: return false
+        return runCatching { sendSignal(exchange.seal(payload)) }.getOrElse {
             resetAuthentication()
             reportError("Signing the call setup failed. End and rejoin the call.")
+            false
         }
     }
 
@@ -417,20 +696,46 @@ internal class TogetherCall(private val context: Context, private val session: T
         approval = null
         disposePeer()
     }
-    private fun sdpObserver(onCreated: (SessionDescription) -> Unit = {}, onSet: () -> Unit = {}) = object : SdpObserver {
-        override fun onCreateSuccess(description: SessionDescription) { main.post { if (!closed) onCreated(description) } }
-        override fun onSetSuccess() { main.post { if (!closed) onSet() } }
-        override fun onCreateFailure(error: String) { failed() }
-        override fun onSetFailure(error: String) { failed() }
-        private fun failed() { main.post { if (!closed) mutable.value = mutable.value.copy(error = "Call negotiation failed. End and rejoin the call.") } }
+    private fun sdpObserver(onCreated: (SessionDescription) -> Unit = {}, onSet: () -> Unit = {}): SdpObserver {
+        val run = peerGeneration
+        return object : SdpObserver {
+            override fun onCreateSuccess(description: SessionDescription) { main.post { if (run == peerGeneration && !closed) onCreated(description) } }
+            override fun onSetSuccess() { main.post { if (run == peerGeneration && !closed) onSet() } }
+            override fun onCreateFailure(error: String) { failed(error) }
+            override fun onSetFailure(error: String) { failed(error) }
+            private fun failed(error: String) { main.post {
+                if (run != peerGeneration || closed) return@post
+                android.util.Log.w("TogetherCall", "Call description negotiation failed: $error")
+                remoteSdp = null
+                negotiating = false
+                scheduleRecovery()
+            } }
+        }
     }
+
     private fun disposePeer() {
+        main.removeCallbacks(recover)
+        main.removeCallbacks(sampleStats)
+        main.removeCallbacks(checkCallFlags)
+        callFlagsMayBeStale = false; waitForCallFlagsUntil = 0
         videoSender = null
         peerGeneration++; peer?.close(); peer?.dispose(); peer = null; remoteId = null
-        hasRemoteDescription = false; offerStarted = false; candidates.clear()
-        mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false)
+        negotiationId = null; negotiating = false; hasRemoteDescription = false
+        remoteSdp = null; localSdp = null; remoteCandidates.clear(); localCandidates.clear()
+        signalingOnline = false; recovering = false; wasConnected = false; recoveryAttempts = 0
+        statsSampler = CallStatsSampler(); lastDiagnostics = null
+        mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false, retryAvailable = false, connectedAtMs = 0L)
     }
     fun stop() {
+        main.removeCallbacks(networkChanged)
+        if (monitoringNetwork) {
+            connectivity.unregisterNetworkCallback(networkCallback)
+            monitoringNetwork = false
+        }
+        checkedNetwork = null
+        if (mutable.value.active) sendAuthenticated(JSONObject().put("type", "hangup"))
+        mutable.value = mutable.value.copy(active = false)
+        torch(false)
         stopScreenShare()
         camera(false); audioTrack.setEnabled(false); resetAuthentication()
         mutable.value = mutable.value.copy(active = false, mic = false, camera = false, connection = "Call is off", error = null)
@@ -443,7 +748,7 @@ internal class TogetherCall(private val context: Context, private val session: T
     }
     fun hangUp() {
         stop()
-        if (session.state.value.pairKind in setOf(PairKind.AUDIO, PairKind.VIDEO)) session.leave()
+        if (session.state.value.pairKind in setOf(PairKind.AUDIO, PairKind.VIDEO) && session.state.value.media == null) session.leave()
     }
     fun reportError(error: String) { mutable.value = mutable.value.copy(error = error) }
 
@@ -463,6 +768,7 @@ internal class TogetherCall(private val context: Context, private val session: T
             val track = factory.createVideoTrack("saoreo-screen", source).also { screenTrack = it }
             check(videoSender?.setTrack(track, false) != false)
             camera(false)
+            configureVideoSender()
             mutable.value = mutable.value.copy(sharing = true, localVideo = track)
             announceScreenShare()
             announce()
@@ -479,6 +785,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         runCatching { capture.stopCapture() }
         capture.dispose()
         screenTrack?.dispose(); screenTrack = null
+        configureVideoSender()
         screenSource?.dispose(); screenSource = null
         screenTexture?.dispose(); screenTexture = null
         mutable.value = mutable.value.copy(sharing = false, localVideo = videoTrack)
@@ -488,16 +795,20 @@ internal class TogetherCall(private val context: Context, private val session: T
     }
     private fun networkLost() {
         if (closed) return
-        if (mutable.value.active) mutable.value = mutable.value.copy(connection = "Reconnecting to Together")
+        signalingOnline = false
+        callFlagsMayBeStale = true
+        if (mutable.value.active && peer != null && !mediaConnected()) scheduleRecovery()
     }
     override fun close() {
         if (closed) return
-        stop(); closed = true; session.onSignal = null; session.onConnectionLost = null
+        stop(); closed = true; session.onSignal = null; session.onConnectionLost = null; session.callOnReconnect = null
+        cameraManager.unregisterTorchCallback(torchCallback)
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
         audioTrack.dispose(); audioSource.dispose(); videoTrack.dispose(); videoSource.dispose()
         factory.dispose(); adm.release(); egl.release()
     }
     companion object {
+        private val recoveryBackoff = longArrayOf(3500, 5500, 8000, 12000, 15000)
         private val secureFingerprint = Regex("(?mi)^a=fingerprint:sha-256 (?:[0-9a-f]{2}:){31}[0-9a-f]{2}\\r?$")
         fun outputName(device: AudioDeviceInfo): String = when (device.type) {
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"

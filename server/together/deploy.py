@@ -39,10 +39,11 @@ no-tls
 no-dtls
 no-multicast-peers
 no-tcp-relay
-user-quota=4
-total-quota=12
+# Two transports on two interfaces may overlap across two ICE generations.
+user-quota=8
+total-quota=32
 max-bps=1000000
-bps-capacity=4000000
+bps-capacity=16000000
 max-allocate-lifetime=3600
 stale-nonce=600
 denied-peer-ip=0.0.0.0-0.255.255.255
@@ -153,7 +154,7 @@ def main():
         sftp.mkdir(stage, mode=0o700)
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode='w') as tar:
-            for name in ['service.py', 'relay.py', 'pairing.py', 'games.py', 'game_physics.py', 'requirements.txt',
+            for name in ['service.py', 'relay.py', 'pairing.py', 'fcm.py', 'games.py', 'game_physics.py', 'requirements.txt',
                          'test_service.py', 'test_relay.py', 'test_pairing.py', 'test_games.py']:
                 tar.add(pathlib.Path(__file__).parent / name, arcname=name)
         with sftp.open(stage + '/source.tar', 'wb') as f: f.write(archive.getvalue())

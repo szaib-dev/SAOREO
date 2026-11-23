@@ -48,10 +48,12 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startAvailability() else pairing.error("Allow notifications to receive calls when Together is closed.")
     }
-    LaunchedEffect(partner) {
+    LaunchedEffect(partner, state.availableInBackground) {
+        if (!state.availableInBackground && pairing.resumeAvailabilityAtBoot &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) startAvailability()
         val preferences = context.getSharedPreferences("together-background-setup", Context.MODE_PRIVATE)
-        if (!preferences.getBoolean("offered", false)) {
-            preferences.edit().putBoolean("offered", true).apply()
+        if (!preferences.getBoolean("offered-v2", false)) {
+            preferences.edit().putBoolean("offered-v2", true).apply()
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
                 startAvailability()
             } else notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -68,14 +70,14 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
             Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
         }
     }
-    Button({ pairing.ring(kind) }, enabled = state.connected && state.ring == null, modifier = Modifier.fillMaxWidth()) {
+    Button({ pairing.ring(kind) }, enabled = state.connected && state.ring == null && state.requesting == null, modifier = Modifier.fillMaxWidth()) {
         val icon = when (kind) { PairKind.WATCH -> R.drawable.ic_media_play; PairKind.AUDIO -> R.drawable.ic_call; PairKind.VIDEO -> R.drawable.ic_camera }
         Icon(painterResource(icon), null, Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
-        Text(when (kind) { PairKind.WATCH -> "Send watch invite"; PairKind.AUDIO -> "Start audio call"; PairKind.VIDEO -> "Start video call" })
+        Text(if (state.requesting != null) "Calling..." else when (kind) { PairKind.WATCH -> "Send watch invite"; PairKind.AUDIO -> "Start audio call"; PairKind.VIDEO -> "Start video call" })
     }
     if (kind != PairKind.WATCH) OutlinedButton({ pairing.ring(kind, silent = true) },
-        enabled = state.connected && state.ring == null, modifier = Modifier.fillMaxWidth()) {
+        enabled = state.connected && state.ring == null && state.requesting == null, modifier = Modifier.fillMaxWidth()) {
         Text("Call silently")
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -181,7 +183,7 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
             confirmButton = { Button({ pairing.answer(ring.id, true) }) { Text("Accept") } },
             dismissButton = { TextButton({ pairing.answer(ring.id, false) }) { Text("Decline") } })
     } else {
-        AlertDialog(onDismissRequest = { pairing.cancel(ring.id) }, title = { Text(if (ring.silent) "Calling $partner silently…" else "Ringing $partner…") },
+        AlertDialog(onDismissRequest = { pairing.cancel(ring.id) }, title = { Text(if (ring.silent) "Calling $partner silently…" else if (ring.delivered) "Ringing $partner…" else "Calling $partner…") },
             text = { Text(ring.kind.title) }, confirmButton = { TextButton({ pairing.cancel(ring.id) }) { Text("Cancel request") } })
     }
 }

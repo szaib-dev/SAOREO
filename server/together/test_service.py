@@ -100,6 +100,31 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         state = await self.event(wa, 'state', lambda s: s['revision'] >= state['revision'])
         self.assertFalse(state['playing'])
 
+    async def test_socket_reconnect_keeps_call_identity_and_resumes_playback(self):
+        a, b, wa, wb = await self.pair()
+        await wa.send_json(dict(type='media', seq=1, media=VIDEO))
+        snapshot = await self.event(wb, 'state', lambda state: state['media'] is not None)
+        media_id = snapshot['media']['id']
+        for ws in (wa, wb):
+            await ws.send_json(dict(type='call', active=True, mic=True, camera=True))
+            await ws.send_json(dict(type='status', ready=True, mediaId=media_id))
+        await self.event(wa, 'state', lambda state: all(m['call'] and m['ready'] for m in state['members']))
+        await wa.send_json(dict(type='play', seq=2, mediaId=media_id))
+        await self.event(wa, 'state', lambda state: state['playing'])
+        await wb.close()
+        paused = await self.event(wa, 'state', lambda state: any(not m['online'] for m in state['members']))
+        self.assertFalse(paused['playing'])
+        self.assertTrue(paused['wanted'])
+        self.assertTrue(all(m['call'] for m in paused['members']))
+        wb = await self.attach(b)
+        await wb.send_json(dict(type='status', ready=True, mediaId=media_id))
+        resumed = await self.event(wa, 'state', lambda state: state['playing'])
+        self.assertEqual([a['member'], b['member']], [m['id'] for m in resumed['members']])
+        self.assertTrue(all(m['call'] and m['camera'] for m in resumed['members']))
+        self.assertGreaterEqual(resumed['position'], paused['position'])
+        await wb.send_json(dict(type='call', active=False))
+        await self.event(wa, 'state', lambda state: not state['members'][1]['call'])
+
     async def test_network_reports_identify_the_member_without_changing_playback(self):
         a, b, wa, wb = await self.pair()
         await wa.send_json(dict(type='ping', sent=12, slowConnection=True, member=b['member']))

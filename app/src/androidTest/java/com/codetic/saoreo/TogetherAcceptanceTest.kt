@@ -53,7 +53,11 @@ class TogetherAcceptanceTest {
             withContext(Dispatchers.Main) { a.setMedia(TogetherMedia("", "youtube", "aqz-KE-bpKQ", "Android acceptance", 0, false)) }
             withTimeout(10000) { a.state.first { it.media != null }; b.state.first { it.media != null } }; android.util.Log.i("SAOREO_TEST", "Media acknowledged on both")
             withContext(Dispatchers.Main) { a.status(true); b.status(true) }
-            withTimeout(10000) { a.state.first { it.members.all { m -> m.ready } } }; android.util.Log.i("SAOREO_TEST", "Both ready")
+            withTimeout(10000) {
+                a.state.first { it.canStartPlayback }
+                b.state.first { it.canStartPlayback }
+            }
+            android.util.Log.i("SAOREO_TEST", "Both ready")
             withContext(Dispatchers.Main) { b.playback("play") }
             withTimeout(10000) { a.state.first { it.timeline.playing } }; android.util.Log.i("SAOREO_TEST", "Mutual play passed")
             withContext(Dispatchers.Main) { a.playback("seek", 45000); a.playback("pause") }
@@ -84,8 +88,48 @@ class TogetherAcceptanceTest {
             val frames = AtomicInteger()
             val sink = VideoSink { frames.incrementAndGet() }
             track.addSink(sink)
-            try { withTimeout(15000) { while (frames.get() < 5) delay(100) } }
-            finally { track.removeSink(sink) }
+            try {
+                withTimeout(15000) { while (frames.get() < 5) delay(100) }
+                if (args.getString("exerciseRecovery") == "true") {
+                    val count = frames.get()
+                    withContext(Dispatchers.Main) { ca.retryConnection() }
+                    withTimeout(45_000) {
+                        ca.state.first { it.connection == "Connected" }
+                        cb.state.first { it.connection == "Connected" }
+                        while (frames.get() < count + 30) delay(100)
+                    }
+                    assertSame(track, cb.state.value.remoteVideo)
+                    android.util.Log.i("SAOREO_TEST", "PASS ICE restart retained the remote track and received new frames")
+                }
+                if (args.getString("exerciseOutage") == "true") {
+                    fun airplane(enabled: Boolean) {
+                        val mode = if (enabled) "enable" else "disable"
+                        android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                            instrumentation.uiAutomation.executeShellCommand("cmd connectivity airplane-mode $mode")).use { it.readBytes() }
+                    }
+                    val count = frames.get()
+                    airplane(true)
+                    try {
+                        withTimeout(30_000) { ca.state.first { it.connection == "Reconnecting…" } }
+                        delay(4_000)
+                    } finally { airplane(false) }
+                    withTimeout(60_000) {
+                        ca.state.first { it.connection == "Connected" }
+                        cb.state.first { it.connection == "Connected" }
+                        while (frames.get() < count + 60) delay(100)
+                    }
+                    assertSame(track, cb.state.value.remoteVideo)
+                    android.util.Log.i("SAOREO_TEST", "PASS temporary airplane-mode outage recovered on the existing remote track")
+                }
+                val watchMs = args.getString("holdCallMs")?.toLongOrNull()?.coerceIn(0, 180_000) ?: 0
+                if (watchMs > 0) {
+                    val count = frames.get()
+                    delay(watchMs)
+                    assertEquals("Connected", ca.state.value.connection)
+                    assertEquals("Connected", cb.state.value.connection)
+                    assertTrue("Continuous video must still be decoding", frames.get() > count)
+                }
+            } finally { track.removeSink(sink) }
             assertTrue("Native camera frames must arrive over forced TURN", frames.get() >= 5)
             withContext(Dispatchers.Main) {
                 ca.microphone(false)

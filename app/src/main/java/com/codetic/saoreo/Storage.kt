@@ -281,6 +281,21 @@ class SaoreoApp : Application(), ImageLoaderFactory {
         super.onCreate()
         screenCaptureProtection = ScreenCaptureProtection(this)
         lyrics.start()
+        TogetherMessagingService.register(this)
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: android.app.Activity) {
+                if (pairing.resumeAvailabilityAtBoot && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    runCatching { androidx.core.content.ContextCompat.startForegroundService(this@SaoreoApp,
+                        android.content.Intent(this@SaoreoApp, TogetherAvailabilityService::class.java)) }
+                }
+            }
+            override fun onActivityCreated(activity: android.app.Activity, state: android.os.Bundle?) = Unit
+            override fun onActivityResumed(activity: android.app.Activity) = Unit
+            override fun onActivityPaused(activity: android.app.Activity) = Unit
+            override fun onActivityStopped(activity: android.app.Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, state: android.os.Bundle) = Unit
+            override fun onActivityDestroyed(activity: android.app.Activity) = Unit
+        })
         converter.recover
     }
 

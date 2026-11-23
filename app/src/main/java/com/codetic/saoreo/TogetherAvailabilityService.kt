@@ -31,7 +31,7 @@ internal fun togetherCallAlertsAllowed(context: Context): Boolean =
 
 class TogetherBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (intent.action !in setOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED)) return
         val pairing = (context.applicationContext as SaoreoApp).pairing
         if (pairing.resumeAvailabilityAtBoot) runCatching {
             ContextCompat.startForegroundService(context, Intent(context, TogetherAvailabilityService::class.java))
@@ -44,13 +44,19 @@ class TogetherAvailabilityService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val notifications get() = getSystemService(NotificationManager::class.java)
     private var shownRing: String? = null
+    private lateinit var availableNotification: Notification
+
+    private fun promote(id: Int, notification: Notification) {
+        if (Build.VERSION.SDK_INT >= 34) startForeground(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        else startForeground(id, notification)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         notifications.createNotificationChannel(NotificationChannel(AVAILABLE, "Together availability", NotificationManager.IMPORTANCE_LOW))
-        notifications.createNotificationChannel(NotificationChannel(SILENT_RING, "Silent Together calls", NotificationManager.IMPORTANCE_LOW).apply {
+        notifications.createNotificationChannel(NotificationChannel(SILENT_RING, "Silent Together calls", NotificationManager.IMPORTANCE_DEFAULT).apply {
             setSound(null, null)
             enableVibration(false)
         })
@@ -61,20 +67,21 @@ class TogetherAvailabilityService : Service() {
         })
         val stop = PendingIntent.getService(this, 1, Intent(this, javaClass).setAction(STOP), pendingFlags)
         val notification = Notification.Builder(this, AVAILABLE)
-            .setSmallIcon(R.drawable.ic_app_notification)
+            .setSmallIcon(R.drawable.ic_call)
             .setContentTitle("Available on Together")
             .setContentText("Your paired partner can reach you.")
             .setContentIntent(openTogether(2))
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Go offline", stop).build())
             .build()
-        if (Build.VERSION.SDK_INT >= 34) startForeground(AVAILABLE_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        else startForeground(AVAILABLE_ID, notification)
+        availableNotification = notification
+        promote(AVAILABLE_ID, notification)
         pairing.background(true)
         scope.launch {
             pairing.state.collect { state ->
-                val ring = state.ring?.takeIf { it.incoming && !state.visible && it.until > SystemClock.elapsedRealtime() }
+                val ring = state.ring?.takeIf { it.incoming && it.until > SystemClock.elapsedRealtime() }
                 if (ring?.id != shownRing) {
+                    promote(AVAILABLE_ID, availableNotification)
                     notifications.cancel(RING_ID)
                     shownRing = ring?.id
                     if (ring != null && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
@@ -86,11 +93,11 @@ class TogetherAvailabilityService : Service() {
     }
 
     private fun showRing(ring: PairRing, partner: String) {
-        val quiet = ring.silent || !togetherCallAlertsAllowed(this)
+        val quiet = ring.silent || pairing.state.value.visible || !togetherCallAlertsAllowed(this)
         val decline = PendingIntent.getService(this, 3, Intent(this, javaClass).setAction(DECLINE).putExtra("id", ring.id), pendingFlags)
         val answer = openTogether(4, ring.id)
         val builder = Notification.Builder(this, if (quiet) SILENT_RING else RING)
-            .setSmallIcon(R.drawable.ic_app_notification)
+            .setSmallIcon(R.drawable.ic_call_incoming_notification)
             .setContentTitle(ring.kind.title)
             .setContentText(partner)
             .setCategory(if (ring.kind == PairKind.WATCH) Notification.CATEGORY_EVENT else Notification.CATEGORY_CALL)
@@ -107,7 +114,11 @@ class TogetherAvailabilityService : Service() {
                 builder.setFullScreenIntent(openTogether(6, showRing = true), true)
             }
         }
-        notifications.notify(RING_ID, builder.build())
+        if (ring.kind == PairKind.WATCH) notifications.notify(RING_ID, builder.build())
+        else {
+            promote(RING_ID, builder.build())
+            notifications.cancel(AVAILABLE_ID)
+        }
     }
 
     private fun openTogether(request: Int, answer: String? = null, showRing: Boolean = false): PendingIntent = PendingIntent.getActivity(this, request,
@@ -117,7 +128,10 @@ class TogetherAvailabilityService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             STOP -> { pairing.setAvailabilityPreference(false); stopSelf(); return START_NOT_STICKY }
-            DECLINE -> intent.getStringExtra("id")?.let { pairing.answer(it, false) }
+            DECLINE -> intent.getStringExtra("id")?.let { id -> scope.launch { runCatching { pairing.respondRing(id, false) } } }
+        }
+        intent?.getStringExtra("pushRing")?.let { id ->
+            scope.launch { runCatching { pairing.refreshIncoming(id) } }
         }
         return START_STICKY
     }
@@ -132,7 +146,7 @@ class TogetherAvailabilityService : Service() {
     private companion object {
         const val AVAILABLE = "together-availability"
         const val RING = "together-incoming"
-        const val SILENT_RING = "together-incoming-silent"
+        const val SILENT_RING = "together-incoming-silent-v2"
         const val STOP = "stop"
         const val DECLINE = "decline"
         const val AVAILABLE_ID = 82

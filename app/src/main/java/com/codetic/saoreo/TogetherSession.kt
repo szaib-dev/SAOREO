@@ -61,6 +61,8 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     private var seq = 0L
     private var generation = 0
     private var reconnect: Job? = null
+    private var reconnectAttempts = 0
+    private var lastPong = 0L
     private var heartbeat: Job? = null
     private var enterRequest: Job? = null
     private var leaving = false
@@ -71,6 +73,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
     var iceServers: JSONArray = JSONArray(); private set
     var onSignal: ((JSONObject) -> Unit)? = null
     var onConnectionLost: (() -> Unit)? = null
+    var callOnReconnect: (() -> Boolean)? = null
 
     fun serverNow(): Long = SystemClock.elapsedRealtime() + clockOffset
     fun clearError() { mutable.value = mutable.value.copy(error = null) }
@@ -184,10 +187,17 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                 viewModelScope.launch {
                     if (run != generation || leaving) { webSocket.close(1000, null); return@launch }
                     seq = 0
-                    webSocket.send(JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 3).put("games", 1).toString())
+                    lastPong = SystemClock.elapsedRealtime()
+                    val hello = JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 3).put("games", 1)
+                    if (callOnReconnect?.invoke() == false) hello.put("callActive", false)
+                    webSocket.send(hello.toString())
                     heartbeat?.cancel()
                     heartbeat = viewModelScope.launch {
                         while (isActive) {
+                            if (SystemClock.elapsedRealtime() - lastPong >= 16_000) {
+                                reconnectSocket()
+                                return@launch
+                            }
                             val ping = JSONObject().put("sent", SystemClock.elapsedRealtime())
                             mutable.value.connectionSlow?.let { ping.put("slowConnection", it) }
                             send("ping", ping, requireConnected = false)
@@ -218,13 +228,26 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         })
     }
 
+    internal fun checkSignaling() {
+        if (state.value.connected && SystemClock.elapsedRealtime() - lastPong >= 10_000) reconnectSocket()
+    }
+
+    private fun reconnectSocket() {
+        generation++
+        socket?.cancel()
+        socket = null
+        lost()
+    }
+
     private fun lost() {
         if (leaving || token.isEmpty()) return
         heartbeat?.cancel()
         mutable.value = mutable.value.copy(connected = false, connecting = true)
         onConnectionLost?.invoke()
         reconnect?.cancel()
-        reconnect = viewModelScope.launch { delay(2500); connect() }
+        val delayMs = 1000L shl reconnectAttempts.coerceAtMost(4)
+        reconnectAttempts++
+        reconnect = viewModelScope.launch { delay(delayMs); connect() }
     }
 
     private fun media(json: JSONObject) = TogetherMedia(json.getString("id"), json.getString("kind"), json.getString("source"),
@@ -238,6 +261,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                     games.receive(json.getString("type"), json, mutable.value.member)
                 "fileRead" -> sharedFiles.serve(json)
                 "pong" -> {
+                    lastPong = SystemClock.elapsedRealtime()
                     val sent = json.getLong("sent"); val received = SystemClock.elapsedRealtime(); val rtt = received - sent
                     if (rtt in 0..20_000) {
                         val average = latencyAverage?.let { it * .66 + rtt * .34 } ?: rtt.toDouble()
@@ -258,6 +282,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                     val members = memberJson.map { m -> TogetherMember(m.getString("id"), m.getString("name"),
                         m.getInt("ordinal"), m.getBoolean("online"), m.getBoolean("ready"), m.getBoolean("buffering"),
                         m.getBoolean("call"), m.getBoolean("mic"), m.getBoolean("camera")) }
+                    reconnectAttempts = 0
                     mutable.value = old.copy(connected = true, connecting = false, revision = rev, members = members,
                         request = json.optJSONObject("request")?.roomRequest(),
                         media = json.optJSONObject("media")?.let(::media), queue = json.getJSONArray("queue").objects().map(::media),
@@ -313,7 +338,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         sharedFiles.clear()
         roomCallSecret = null
         leaving = true; generation++; reconnect?.cancel(); heartbeat?.cancel()
-        socket?.close(1000, "Left room"); socket = null; token = ""
+        socket?.close(1000, "Left room"); socket = null; token = ""; reconnectAttempts = 0
         onConnectionLost?.invoke()
         mutable.value = TogetherState()
         games.closed()
@@ -334,8 +359,9 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
             reconnect?.cancel()
             socket?.close(1000, "Game may reconnect")
         } else leave()
-        http.dispatcher.executorService.shutdown()
-        http.connectionPool.evictAll()
+        val executor = http.dispatcher.executorService
+        executor.execute { http.connectionPool.evictAll() }
+        executor.shutdown()
     }
 }
 

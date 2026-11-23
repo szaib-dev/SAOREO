@@ -482,6 +482,9 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                 return ws
             if member.ws is not None: await member.ws.close(code=4000, message=b'Reconnected')
             member.ws = ws; member.last_seq = 0; member.ready = False; member.buffering = False
+            if hello.get('callActive') is False and member.call:
+                member.call = member.mic = member.camera = False
+                room.call_fullscreen = False
             member.game_client = hello.get('games') == 1
             member.slow_connection = None
             room.settle()
@@ -503,12 +506,12 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
         finally:
             if member is not None and member.ws is ws:
                 self.relay.disconnected(member)
-                room.call_fullscreen = False
-                member.ws = None; member.ready = False; member.call = member.mic = member.camera = False
+                # The authenticated member can resume after a transport failure.
+                # Offline members still prevent playback until their players report ready again.
+                member.ws = None; member.ready = False; member.buffering = False
                 member.slow_connection = None
                 if room and room.id in self.rooms:
                     room.request = None
-                    room.wanted = False
                     room.settle()
                     await self.broadcast(room, room.snapshot())
         return ws

@@ -45,7 +45,7 @@ internal enum class PairKind(val wire: String, val title: String) {
     }
 }
 
-internal data class PairRing(val id: String, val kind: PairKind, val incoming: Boolean, val until: Long, val silent: Boolean)
+internal data class PairRing(val id: String, val kind: PairKind, val incoming: Boolean, val until: Long, val silent: Boolean, val delivered: Boolean = false)
 internal data class PairLaunch(val id: String, val server: String, val kind: PairKind, val ticket: JSONObject)
 internal data class PairState(
     val partner: String? = null,
@@ -54,14 +54,21 @@ internal data class PairState(
     val visible: Boolean = false,
     val availableInBackground: Boolean = false,
     val ring: PairRing? = null,
+    val requesting: PairKind? = null,
     val launch: PairLaunch? = null,
     val error: String? = null,
 )
 
 /** The pairing socket discovers the paired device. Each accepted request has separate room credentials. */
 internal class TogetherPairing(app: Application) {
+    private val application = app
     private val callIdentity = CallIdentity(app)
     private val preferences = app.getSharedPreferences("together-pairing", 0)
+    init {
+        if (!preferences.getBoolean("backgroundCallsV2", false)) {
+            preferences.edit().putBoolean("backgroundCallsV2", true).putBoolean("backgroundCalls", true).apply()
+        }
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val random = SecureRandom()
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).callTimeout(20, TimeUnit.SECONDS)
@@ -70,11 +77,35 @@ internal class TogetherPairing(app: Application) {
     val state = mutable.asStateFlow()
     val server: String? get() = preferences.getString("server", null)
     val resumeAvailabilityAtBoot: Boolean get() = server != null && mutable.value.partner != null && preferences.getBoolean("backgroundCalls", false)
-    fun setAvailabilityPreference(enabled: Boolean) { preferences.edit().putBoolean("backgroundCalls", enabled).apply() }
+    fun setAvailabilityPreference(enabled: Boolean) {
+        preferences.edit().putBoolean("backgroundCalls", enabled).apply()
+        TogetherMessagingService.register(application)
+    }
+
+    suspend fun registerPush() {
+        val endpoint = server ?: return
+        if (state.value.partner == null) return
+        val token = application.getSharedPreferences("together-push", 0).getString("token", null) ?: return
+        post(endpoint, "push", JSONObject().put("token", token).put("enabled", resumeAvailabilityAtBoot))
+    }
+
+    suspend fun refreshIncoming(id: String) {
+        val endpoint = server ?: return
+        val result = post(endpoint, "state", JSONObject())
+        val ring = result.optJSONObject("ring") ?: return
+        if (ring.optString("id") != id || !ring.optBoolean("incoming") || ring.optLong("remaining") <= 0) return
+        withContext(Dispatchers.Main.immediate) { receive(endpoint, result, fromSocket = false) }
+    }
+
+    suspend fun respondRing(id: String, accepted: Boolean) {
+        val endpoint = server ?: return
+        post(endpoint, "answer", JSONObject().put("id", id).put("accepted", accepted))
+    }
     private var socket: WebSocket? = null
     private var retry: Job? = null
     private var generation = 0
     private var reconnectDelay = 1_000L
+    private var requestGeneration = 0
 
     private fun token(server: String): String {
         val key = "credential:$server"
@@ -119,6 +150,7 @@ internal class TogetherPairing(app: Application) {
         val reply = post(link.server, "accept", JSONObject().put("code", link.code).put("name", name))
         check(callIdentity.startPairing(secret)) { "Couldn’t store the secure pairing key." }
         use(link.server, reply.getString("name"))
+        TogetherMessagingService.register(application)
     }
 
     suspend fun unpair() {
@@ -159,7 +191,7 @@ internal class TogetherPairing(app: Application) {
         retry = null
         socket?.close(1000, null)
         socket = null
-        mutable.value = mutable.value.copy(connected = false, online = false, ring = null)
+        mutable.value = mutable.value.copy(connected = false, online = false, ring = null, requesting = null)
     }
 
     private fun connect() {
@@ -206,7 +238,7 @@ internal class TogetherPairing(app: Application) {
         }
     }
 
-    private fun receive(endpoint: String, message: JSONObject) {
+    private fun receive(endpoint: String, message: JSONObject, fromSocket: Boolean = true) {
         when (message.getString("type")) {
             "pairState" -> {
                 reconnectDelay = 1_000
@@ -217,9 +249,13 @@ internal class TogetherPairing(app: Application) {
                     val silent = wire.endsWith("_silent")
                     val kind = PairKind.fromWire(wire.removeSuffix("_silent")) ?: return@let null
                     val remaining = item.getLong("remaining").coerceIn(0L, 30_000L)
-                    PairRing(item.getString("id"), kind, item.getBoolean("incoming"), SystemClock.elapsedRealtime() + remaining, silent)
+                    PairRing(item.getString("id"), kind, item.getBoolean("incoming"), SystemClock.elapsedRealtime() + remaining, silent, item.optBoolean("delivered"))
                 }
-                mutable.value = mutable.value.copy(connected = true, partner = partner, online = message.optBoolean("online"), ring = ring,
+                if (partner != null && mutable.value.partner != partner) TogetherMessagingService.register(application)
+                if (ring?.incoming == true) scope.launch {
+                    runCatching { post(endpoint, "received", JSONObject().put("id", ring.id)) }
+                }
+                mutable.value = mutable.value.copy(connected = fromSocket || mutable.value.connected, partner = partner, online = message.optBoolean("online"), ring = ring, requesting = if (ring != null) null else mutable.value.requesting,
                     launch = mutable.value.launch.takeIf { partner != null })
             }
             "ringResult" -> {
@@ -246,13 +282,25 @@ internal class TogetherPairing(app: Application) {
         return false
     }
 
-    fun ring(kind: PairKind, room: JSONObject? = null, silent: Boolean = false) =
-        send("ring", (room ?: JSONObject()).put("kind", if (silent && kind != PairKind.WATCH) "${kind.wire}_silent" else kind.wire))
+    fun ring(kind: PairKind, room: JSONObject? = null, silent: Boolean = false) {
+        if (mutable.value.requesting != null || mutable.value.ring != null) return
+        val attempt = ++requestGeneration
+        mutable.value = mutable.value.copy(requesting = kind, error = null)
+        if (!send("ring", (room ?: JSONObject()).put("kind", if (silent && kind != PairKind.WATCH) "${kind.wire}_silent" else kind.wire))) {
+            mutable.value = mutable.value.copy(requesting = null)
+            return
+        }
+        scope.launch {
+            delay(10000)
+            if (attempt == requestGeneration && mutable.value.requesting != null) mutable.value = mutable.value.copy(requesting = null,
+                error = "The call request was not acknowledged. Please try again.")
+        }
+    }
     fun answer(id: String, accepted: Boolean) = send("answer", JSONObject().put("id", id).put("accepted", accepted))
     fun cancel(id: String) = send("cancel", JSONObject().put("id", id))
     fun joined(launch: PairLaunch) {
         if (mutable.value.launch?.id == launch.id) mutable.value = mutable.value.copy(launch = null)
         send("ack", JSONObject().put("id", launch.id))
     }
-    fun error(text: String?) { mutable.value = mutable.value.copy(error = text) }
+    fun error(text: String?) { mutable.value = mutable.value.copy(error = text, requesting = if (text != null) null else mutable.value.requesting) }
 }

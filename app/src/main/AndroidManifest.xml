@@ -47,13 +47,17 @@
                 <data android:path="/together/pair" />
             </intent-filter>
         </activity>
+        <service android:name=".TogetherMessagingService" android:exported="false">
+            <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
+        </service>
         <service android:name=".TogetherAvailabilityService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-enabled availability for incoming private Together calls and watch requests" />
         </service>
         <service android:name=".TogetherActiveCallService" android:exported="false"
             android:foregroundServiceType="microphone|camera|mediaProjection" />
         <receiver android:name=".TogetherBootReceiver" android:exported="false">
-            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
         </receiver>
         <activity android:name=".MusicActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".LibraryPlayerActivity" android:exported="false"

@@ -46,10 +46,11 @@ internal fun TogetherCallView(
     toggleScreenShare: () -> Unit = {}, showAudio: () -> Unit = {},
     connectionNotice: String? = null,
     chatPreviews: List<TogetherChat> = emptyList(),
+    openStream: () -> Unit = onBack,
 ) {
     val peer = room.members.firstOrNull { it.id != room.member }
     val localVideoOn = calling.camera || calling.sharing
-    val peerVideoOn = peer?.camera == true && peer.online
+    val peerVideoOn = peer?.camera == true
     val localName = if (calling.sharing) "Your screen" else "You"
     val peerName = peer?.name ?: "Partner"
     var controlsVisible by rememberSaveable(room.room) { mutableStateOf(true) }
@@ -58,20 +59,20 @@ internal fun TogetherCallView(
     var menuOpen by remember { mutableStateOf(false) }
     var previewX by rememberSaveable(room.room) { mutableFloatStateOf(1f) }
     var previewY by rememberSaveable(room.room) { mutableFloatStateOf(0f) }
-    var connectedAt by rememberSaveable(room.room) { mutableLongStateOf(0L) }
-    LaunchedEffect(calling.active, calling.connection) {
-        if (!calling.active) connectedAt = 0L
-        else if (calling.connection == "Connected" && connectedAt == 0L) connectedAt = SystemClock.elapsedRealtime()
-    }
     val localMain = localFocused && !previewHidden && localVideoOn && peerVideoOn
     val hasPreview = localVideoOn && !previewHidden
     val showControls = controlsVisible || chatOpen
+    var touchedAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(controlsVisible, chatOpen, menuOpen, touchedAt, calling.mic, calling.camera, calling.sharing) {
+        if (controlsVisible && !chatOpen && !menuOpen) { delay(4000); controlsVisible = false }
+    }
     fun hideOrShowPreview() {
         previewHidden = !previewHidden
         if (previewHidden) localFocused = false
     }
     fun toggleControls() {
         menuOpen = false
+        touchedAt = SystemClock.elapsedRealtime()
         controlsVisible = !showControls
         if (chatOpen) toggleChat()
     }
@@ -170,7 +171,13 @@ internal fun TogetherCallView(
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to watch room")
                         }
                     }
-                    CallHeader(standaloneKind, calling, connectionNotice, connectedAt)
+                    Column(Modifier.weight(1f)) {
+                        CallHeader(standaloneKind, calling, connectionNotice, calling.connectedAtMs)
+                        if (calling.retryAvailable) TextButton(call::retryConnection) { Text("Retry connection") }
+                    }
+                    TextButton(openStream, enabled = calling.active, modifier = Modifier.padding(end = 38.dp)) {
+                        Text("Stream", color = Color.White)
+                    }
                 }
                 val safeSides = if (chatOpen) WindowInsetsSides.Horizontal else WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
                 Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
@@ -186,8 +193,9 @@ internal fun TogetherCallView(
                         if (standaloneKind != PairKind.AUDIO) CallAction(
                             if (calling.camera) R.drawable.ic_camera else R.drawable.ic_camera_off,
                             if (calling.camera) "Turn camera off" else "Turn camera on", toggleCamera, enabled = calling.active)
-                        CallAction(R.drawable.ic_call_share_screen, if (calling.sharing) "Stop sharing" else "Share screen",
-                            toggleScreenShare, enabled = calling.active, selected = calling.sharing)
+                        CallAction(R.drawable.ic_camera_flip, "Switch camera", {
+                            touchedAt = SystemClock.elapsedRealtime(); call.flip()
+                        }, enabled = calling.active && calling.camera)
                         CallAction(R.drawable.ic_chat, if (chatOpen) "Close call chat" else "Open call chat", toggleChat, selected = chatOpen)
                         Box {
                             CallAction(R.drawable.ic_call_options, "Call options", { menuOpen = !menuOpen }, selected = menuOpen)
@@ -204,8 +212,12 @@ internal fun TogetherCallView(
                                 }
                                 CallMenuItem("Audio devices", "Speaker, Bluetooth and microphone",
                                     R.drawable.ic_call_audio_devices, enabled = calling.active) { menuOpen = false; showAudio() }
-                                if (calling.camera) CallMenuItem("Switch camera", "Front or rear camera",
-                                    R.drawable.ic_camera_flip) { menuOpen = false; call.flip() }
+                                CallMenuItem(if (calling.sharing) "Stop sharing" else "Share screen", "Share your screen with your partner",
+                                    R.drawable.ic_call_share_screen, enabled = calling.active) { menuOpen = false; toggleScreenShare() }
+                                CallMenuItem(if (calling.torch) "Turn torch off" else "Turn torch on", "Use the phone's flashlight",
+                                    R.drawable.ic_call_torch, enabled = calling.active && calling.hasTorch) {
+                                    touchedAt = SystemClock.elapsedRealtime(); call.torch(!calling.torch)
+                                }
                                 CallMenuItem("Hide controls", "Tap the video to bring them back",
                                     R.drawable.ic_room_fullscreen, onClick = ::toggleControls)
                             }

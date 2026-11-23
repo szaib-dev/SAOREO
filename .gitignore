@@ -15,3 +15,7 @@ __pycache__/
 /app/src/main/jniLibs/*/libsaoreowhisper.so
 /app/src/main/assets/offline-encoder/Whisper-MIT.txt
 /encoder-sources/
+
+# Local Firebase client configuration and server credentials
+/app/google-services.json
+**/*service-account*.json

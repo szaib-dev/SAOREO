@@ -1,4 +1,5 @@
 plugins {
+    id("com.google.gms.google-services") apply false
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -6,6 +7,9 @@ plugins {
 }
 
 val separateInstall = providers.gradleProperty("saoreoSeparateInstall").orNull == "true"
+if (!separateInstall && file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+}
 val selectedAbi = providers.gradleProperty("saoreoAbi").orNull
 val packagedAbis = selectedAbi?.let(::listOf) ?: listOf("arm64-v8a", "x86_64")
 require(selectedAbi == null || selectedAbi in setOf("arm64-v8a", "x86_64")) { "Unsupported SAOREO ABI" }
@@ -18,8 +22,8 @@ android {
         manifestPlaceholders["saoreoLabel"] = "SAOREO"
         minSdk = 33
         targetSdk = 36
-        versionCode = 21
-        versionName = "2.10.1"
+        versionCode = 22
+        versionName = "2.10.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += packagedAbis }
         javaCompileOptions {
@@ -54,6 +58,7 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 kapt { arguments { arg("room.schemaLocation", "$projectDir/schemas") } }
 
 dependencies {
+    implementation("com.google.firebase:firebase-messaging:26.0.2")
     implementation(platform("androidx.compose:compose-bom:2025.10.01"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")

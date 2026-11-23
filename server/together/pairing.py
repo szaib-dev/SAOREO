@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 from aiohttp import WSMsgType, web
+from fcm import FcmSender
 
 
 def timestamp():
@@ -43,6 +44,9 @@ class Pairing:
         self.rings = {}
         self.timers = {}
         self.launches = {}
+        self.fcm = FcmSender()
+        self.received = set()
+        self.push_tasks = set()
 
     async def run(self, app):
         with closing(sqlite3.connect(self.database)) as self.db:
@@ -53,11 +57,14 @@ class Pairing:
                 CREATE TABLE IF NOT EXISTS invite (
                     code TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL, accepted TEXT
                 );
+                CREATE TABLE IF NOT EXISTS push_token (
+                    device TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL
+                );
             ''')
             yield
 
     async def shutdown(self, app):
-        tasks = list(self.timers.values())
+        tasks = list(self.timers.values()) + list(self.push_tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -175,18 +182,68 @@ class Pairing:
             except (OSError, RuntimeError, asyncio.TimeoutError):
                 pass
 
-    async def send_status(self, identifier):
+    def status(self, identifier):
         current = self.device(identifier)
         if current is None:
-            return
+            raise web.HTTPUnauthorized(text='Pair this device first')
         peer = current[1]
         partner = self.device(peer) if peer else None
         ring = self.rings.get(identifier)
-        await self.send(identifier, dict(type='pairState', partner=partner[0] if partner else None,
+        return dict(type='pairState', partner=partner[0] if partner else None,
             online=self.online(peer), ring=dict(id=ring.id, kind=ring.kind, incoming=ring.recipient == identifier,
-                remaining=max(0, ring.expires - timestamp())) if ring else None))
+                delivered=ring.id in self.received,
+                remaining=max(0, ring.expires - timestamp())) if ring else None)
+
+    async def send_status(self, identifier):
+        if self.device(identifier):
+            await self.send(identifier, self.status(identifier))
+
+    async def push_registration(self, request):
+        identifier = self.device_id(request)
+        self.status(identifier)
+        self.service.limit(('push-registration', identifier), 30, 300)
+        data = await request.json()
+        token = data.get('token')
+        if not isinstance(token, str) or not 20 <= len(token) <= 4096 or not re.fullmatch(r'[A-Za-z0-9_:.-]+', token):
+            raise web.HTTPBadRequest(text='Invalid push token')
+        with self.db:
+            self.db.execute('DELETE FROM push_token WHERE device=? OR token=?', (identifier, token))
+            if data.get('enabled') is True:
+                self.db.execute('INSERT INTO push_token VALUES (?, ?)', (identifier, token))
+        return web.json_response({'registered': data.get('enabled') is True})
+
+    async def current_state(self, request):
+        return web.json_response(self.status(self.device_id(request)))
+
+    async def received_call(self, request):
+        identifier = self.device_id(request)
+        self.status(identifier)
+        data = await request.json()
+        ring = self.rings.get(identifier)
+        if ring and ring.recipient == identifier and ring.id == data.get('id') and ring.expires > timestamp():
+            if ring.id not in self.received:
+                self.received.add(ring.id)
+                await self.send_status(ring.sender)
+        return web.json_response({'ok': True})
+
+    async def answer_call(self, request):
+        identifier = self.device_id(request)
+        self.status(identifier)
+        data = await request.json()
+        data['type'] = 'answer'
+        try:
+            await self.command(identifier, data)
+        except ValueError as error:
+            raise web.HTTPConflict(text=str(error)) from error
+        return web.json_response({'ok': True})
+
+    async def wake_recipient(self, ring):
+        entry = self.db.execute('SELECT token FROM push_token WHERE device=?', (ring.recipient,)).fetchone()
+        if entry:
+            await self.fcm.send(entry[0], ring.id, (ring.expires - timestamp()) // 1000)
 
     async def resolve(self, ring, outcome, tickets=None):
+        self.received.discard(ring.id)
         if self.rings.get(ring.sender) != ring:
             return
         participants = (ring.sender, ring.recipient)
@@ -240,6 +297,9 @@ class Pairing:
             self.rings[identifier] = self.rings[partner] = ring
             self.timers[ring.id] = asyncio.create_task(self.expire(ring))
             await asyncio.gather(self.send_status(identifier), self.send_status(partner))
+            task = asyncio.create_task(self.wake_recipient(ring))
+            self.push_tasks.add(task)
+            task.add_done_callback(self.push_tasks.discard)
             return
         ring = self.rings.get(identifier)
         if not ring or ring.id != data.get('id') or ring.expires <= timestamp():
@@ -298,6 +358,10 @@ class Pairing:
         app.cleanup_ctx.append(self.run)
         app.on_shutdown.append(self.shutdown)
         app.router.add_get('/together/pair', self.page)
+        app.router.add_post('/together/api/pair/push', self.push_registration)
+        app.router.add_post('/together/api/pair/state', self.current_state)
+        app.router.add_post('/together/api/pair/received', self.received_call)
+        app.router.add_post('/together/api/pair/answer', self.answer_call)
         app.router.add_post('/together/api/pair/invite', self.invite)
         app.router.add_post('/together/api/pair/preview', self.preview)
         app.router.add_post('/together/api/pair/accept', self.accept)
