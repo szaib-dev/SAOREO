@@ -60,23 +60,17 @@ import kotlin.math.acos
 import kotlin.math.cos
 import kotlin.math.sin
 
-internal data class LyricLine(val time: Long?, val text: String)
-
-internal fun parseLyrics(text: String): List<LyricLine> = text.lineSequence().flatMap { line ->
-    val matches = Regex("\\[(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?]").findAll(line).toList()
-    if (matches.isEmpty()) listOfNotNull(line.trim().takeIf { it.isNotEmpty() && !it.startsWith("[") }?.let { LyricLine(null, it) })
-    else matches.map { match ->
-        val ms = match.groupValues[3].padEnd(3, '0').take(3).toLongOrNull() ?: 0
-        LyricLine((match.groupValues[1].toLong() * 60 + match.groupValues[2].toLong()) * 1000 + ms,
-            line.substring(matches.last().range.last + 1).trim())
-    }
-}.toList().let { rows -> if (rows.all { it.time != null }) rows.sortedBy { it.time } else rows }
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?, title: String, artist: String,
                         liked: Boolean, toggle: () -> Unit, like: () -> Unit, onDismiss: () -> Unit = {}) {
     val reading = rememberPlayback(player)
+    val lyricMetadata by remember(song?.id) {
+        song?.id?.let(app.lyrics.dao::observe) ?: kotlinx.coroutines.flow.flowOf(null)
+    }.collectAsStateWithLifecycle(null)
+    val displayTitle = song?.localTitle ?: lyricMetadata?.title ?: title
+    val displayArtist = song?.artist ?: lyricMetadata?.artist?.takeIf(String::isNotBlank) ?: artist
+
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var panel by rememberSaveable { mutableStateOf<String?>(null) }
@@ -115,57 +109,48 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
         }
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val artSize = minOf(maxWidth.value - 20, maxHeight.value * .38f).toInt().coerceIn(104, 252)
-        val next = queue.getOrNull(player.nextMediaItemIndex)
-        val following = if (!shuffle && next != null) queue.getOrNull(player.nextMediaItemIndex + 1) else null
+        val artSize = minOf(maxWidth.value - 32, maxHeight.value * .40f).toInt().coerceIn(104, 280)
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 8.dp),
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 8.dp)
+            .pointerInput(player) {
+                detectTapGestures(onDoubleTap = { point ->
+                    val forward = point.x >= size.width / 2f
+                    val target = player.currentPosition + if (forward) 10_000L else -10_000L
+                    player.seekTo(target.coerceIn(0L, player.duration.takeIf { it > 0 } ?: Long.MAX_VALUE))
+                    seekFeedback = if (forward) "Forward 10 seconds" else "Back 10 seconds"
+                })
+            },
             verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             var drag by remember { mutableFloatStateOf(0f) }
             Box(Modifier.padding(top = 6.dp).width(artSize.dp).height(
-                (artSize + (if (next != null) 34 else 0) + (if (following != null) 19 else 0)).dp
+                artSize.dp
             ).pointerInput(player) {
                 detectHorizontalDragGestures(onDragStart = { drag = 0f }, onDragEnd = {
                     if (drag < -100 && player.hasNextMediaItem()) player.seekToNextMediaItem()
                     else if (drag > 100) player.seekToPrevious()
                 }) { change, amount -> change.consume(); drag += amount }
             }.pointerInput(player) {
-                detectTapGestures(onDoubleTap = { point ->
-                    if (point.x < size.width / 2) { player.seekBack(); seekFeedback = "Back 10 seconds" }
-                    else { player.seekForward(); seekFeedback = "Forward 10 seconds" }
-                })
-            }.pointerInput(player) {
                 var vertical = 0f
                 detectDragGesturesAfterLongPress(onDragStart = { vertical = 0f }, onDragEnd = {
                     if (vertical > 80.dp.toPx()) { player.stop(); player.clearMediaItems(); app.audioControl.sleepUntil.value = 0; onDismiss() }
                 }) { change, delta -> change.consume(); vertical += delta.y }
             }) {
-                if (following != null) {
-                    Artwork(app, following.mediaId, artSize - 52, true,
-                        Modifier.align(Alignment.TopCenter).size((artSize - 52).dp), CircleShape,
-                        following.mediaMetadata.artworkUri?.toString())
-                }
-                if (next != null) {
-                    Artwork(app, next.mediaId, artSize - 24, true,
-                        Modifier.align(Alignment.TopCenter).padding(top = if (following != null) 19.dp else 0.dp)
-                            .size((artSize - 24).dp), CircleShape, next.mediaMetadata.artworkUri?.toString())
-                }
                 Artwork(app, player.currentMediaItem?.mediaId, artSize, true,
                     Modifier.align(Alignment.BottomCenter).size(artSize.dp)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
-                    CircleShape, player.mediaMetadata.artworkUri?.toString() ?: song?.thumbnail)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, androidx.compose.foundation.shape.RoundedCornerShape(20.dp)),
+                    androidx.compose.foundation.shape.RoundedCornerShape(20.dp), player.mediaMetadata.artworkUri?.toString() ?: song?.thumbnail)
                 androidx.compose.animation.AnimatedVisibility(seekFeedback != null, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
                     Surface(shape = CircleShape, color = Ink.copy(alpha = .86f)) {
                         Text(seekFeedback.orEmpty(), Modifier.padding(horizontal = 18.dp, vertical = 12.dp), color = Lime)
                     }
                 }
             }
-            ArcTrackPosition(reading, player, Modifier.width((artSize + 16).dp))
+            CompactSeek(reading, player)
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                    Text(displayTitle, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(displayArtist, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 IconButton(like, enabled = song != null) {
                     Icon(if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
@@ -213,7 +198,9 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
             }
         }
     }
-    panel?.let { name -> ModalBottomSheet(onDismissRequest = { panel = null }) {
+    if (panel == "Lyrics") LyricsSheet(app, player, song, { panel = null },
+        { lyricsPicker.launch(arrayOf("text/*", "application/octet-stream")) }, message)
+    panel?.takeUnless { it == "Lyrics" }?.let { name -> ModalBottomSheet(onDismissRequest = { panel = null }) {
         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(horizontal = 24.dp).navigationBarsPadding()) {
             Text(name, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 12.dp))
             when (name) {
@@ -229,82 +216,10 @@ internal fun NowPlaying(app: SaoreoApp, player: MediaController, song: Download?
                             } })
                     }
                 }
-                "Lyrics" -> {
-                    val lines = remember(song?.lyrics) { parseLyrics(song?.lyrics.orEmpty()) }
-                    val active = lines.indexOfLast { it.time != null && it.time <= reading.position }
-                    LazyColumn(Modifier.weight(1f, fill = false)) {
-                        if (lines.isEmpty()) item { Text("Add a local LRC or text file for this song.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        itemsIndexed(lines) { index, line ->
-                            Text(line.text, Modifier.fillMaxWidth().clickable(enabled = line.time != null) { line.time?.let(player::seekTo) }.padding(vertical = 10.dp),
-                                style = MaterialTheme.typography.titleMedium, fontWeight = if (active == index) FontWeight.Bold else FontWeight.Normal,
-                                color = if (active == index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    TextButton({ lyricsPicker.launch(arrayOf("text/*", "application/octet-stream")) }, enabled = song != null) { Text("Import local lyrics") }
-                }
+
             }
         }
     } }
-}
-
-@Composable
-private fun ArcTrackPosition(reading: Playback, player: Player, modifier: Modifier = Modifier) {
-    val duration = reading.duration.coerceAtLeast(1).toFloat()
-    val seekable = reading.duration > 0 && player.isCurrentMediaItemSeekable
-    var preview by remember(player.currentMediaItem?.mediaId) { mutableStateOf<Float?>(null) }
-    val position = (preview ?: reading.position.toFloat()).coerceIn(0f, duration)
-    val fraction = position / duration
-    val trackColor = MaterialTheme.colorScheme.outlineVariant
-    val activeColor = MaterialTheme.colorScheme.primary
-    val background = MaterialTheme.colorScheme.background
-    val scrub = if (seekable) Modifier
-        .pointerInput(player, duration) {
-            detectTapGestures { point ->
-                player.seekTo(arcPosition(point.x, size.width.toFloat(), 10.dp.toPx(), duration).toLong())
-            }
-        }
-        .pointerInput(player, duration) {
-            detectHorizontalDragGestures(
-                onDragCancel = { preview = null },
-                onDragEnd = { preview?.let { player.seekTo(it.toLong()) }; preview = null },
-            ) { change, _ ->
-                change.consume()
-                preview = arcPosition(change.position.x, size.width.toFloat(), 10.dp.toPx(), duration)
-            }
-        } else Modifier
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Canvas(Modifier.fillMaxWidth().height(48.dp).then(scrub).semantics {
-            contentDescription = "Track position"
-            progressBarRangeInfo = ProgressBarRangeInfo(position, 0f..duration)
-            if (seekable) setProgress { target ->
-                player.seekTo(target.coerceIn(0f, duration).toLong())
-                true
-            }
-        }) {
-            val inset = 10.dp.toPx()
-            val radiusX = (size.width / 2f - inset).coerceAtLeast(1f)
-            val radiusY = size.height - 15.dp.toPx()
-            val center = Offset(size.width / 2f, 7.dp.toPx())
-            val arcTop = Offset(center.x - radiusX, center.y - radiusY)
-            val arcSize = Size(radiusX * 2, radiusY * 2)
-            val stroke = Stroke(3.dp.toPx(), cap = StrokeCap.Round)
-            drawArc(trackColor, 180f, -180f, false, arcTop, arcSize, style = stroke)
-            if (fraction > 0f) drawArc(activeColor, 180f, -180f * fraction, false, arcTop, arcSize, style = stroke)
-            val angle = PI * (1 - fraction)
-            val thumb = center + Offset(radiusX * cos(angle).toFloat(), radiusY * sin(angle).toFloat())
-            drawCircle(activeColor, 6.dp.toPx(), thumb)
-            drawCircle(background, 3.dp.toPx(), thumb)
-        }
-        Text("${playbackTime(position.toLong())} / ${playbackTime(reading.duration)}",
-            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-private fun arcPosition(x: Float, width: Float, inset: Float, duration: Float): Float {
-    val radius = (width / 2f - inset).coerceAtLeast(1f)
-    val cosine = ((x - width / 2f) / radius).coerceIn(-1f, 1f)
-    return ((1.0 - acos(cosine.toDouble()) / PI) * duration).toFloat()
 }
 
 internal fun nextRepeatMode(mode: Int): Int = when (mode) { Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL; Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE; else -> Player.REPEAT_MODE_OFF }

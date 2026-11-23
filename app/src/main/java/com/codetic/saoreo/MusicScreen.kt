@@ -417,9 +417,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         if (full) full = false else collection = null
     }
     val showPlaylistCover = playlist != null && !full
-    Box(Modifier.fillMaxSize().background(if (full) Brush.verticalGradient(listOf(
-        MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.background), endY = 1300f)
-        else Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background)))) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     if (showPlaylistCover && playlist != null) {
         val cover = playlistSongs.firstOrNull()
         val base = MaterialTheme.colorScheme.background
