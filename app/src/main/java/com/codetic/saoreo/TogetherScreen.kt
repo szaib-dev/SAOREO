@@ -855,7 +855,6 @@ private fun TogetherWindow(fullscreen: Boolean, callView: Boolean, exitFullscree
     val activity = LocalActivity.current ?: return
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val exit by rememberUpdatedState(exitFullscreen)
-    val immersive = fullscreen || callView
     DisposableEffect(activity) {
         val originalOrientation = activity.requestedOrientation
         onDispose { activity.requestedOrientation = originalOrientation }
@@ -868,19 +867,21 @@ private fun TogetherWindow(fullscreen: Boolean, callView: Boolean, exitFullscree
         }
         if (activity.requestedOrientation != orientation) activity.requestedOrientation = orientation
     }
-    DisposableEffect(activity, immersive) {
+    DisposableEffect(activity, fullscreen, callView) {
         val window = activity.window
         val insets = WindowCompat.getInsetsController(window, window.decorView)
         val originalBehavior = insets.systemBarsBehavior
-        if (immersive) {
-            insets.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            insets.hide(WindowInsetsCompat.Type.systemBars())
+        val hiddenBars = when {
+            fullscreen -> WindowInsetsCompat.Type.systemBars()
+            // Keep Android Back available in the call, including on a fresh install.
+            callView -> WindowInsetsCompat.Type.statusBars()
+            else -> 0
         }
+        if (fullscreen) insets.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (hiddenBars != 0) insets.hide(hiddenBars)
         onDispose {
-            if (immersive) {
-                insets.show(WindowInsetsCompat.Type.systemBars())
-                insets.systemBarsBehavior = originalBehavior
-            }
+            if (hiddenBars != 0) insets.show(hiddenBars)
+            insets.systemBarsBehavior = originalBehavior
         }
     }
     DisposableEffect(activity, lifecycle, fullscreen) {

@@ -31,7 +31,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:supportsPictureInPicture="true" android:resizeableActivity="true" android:name=".TogetherActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" android:windowSoftInputMode="adjustResize">
+        <activity android:supportsPictureInPicture="true" android:resizeableActivity="true" android:name=".TogetherActivity" android:enableOnBackInvokedCallback="true" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
