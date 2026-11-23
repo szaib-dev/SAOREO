@@ -356,10 +356,12 @@ internal class TogetherCall(private val context: Context, private val session: T
             }
         }
         if (other == null || !other.call) {
-            val ended = peer != null && wasConnected
-            if (authentication != null || peer != null) resetAuthentication()
-            if (ended || mutable.value.connection != "Partner ended the call") {
-                mutable.value = mutable.value.copy(connection = if (ended) "Partner ended the call" else "Waiting for your partner")
+            if (peer != null && wasConnected) partnerEnded()
+            else {
+                if (authentication != null || peer != null) resetAuthentication()
+                if (mutable.value.connection != "Partner ended the call") {
+                    mutable.value = mutable.value.copy(connection = "Waiting for your partner")
+                }
             }
             return
         }
@@ -604,10 +606,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         when (payload.optString("type")) {
             "screenShare" -> mutable.value = mutable.value.copy(remoteSharing = payload.optBoolean("enabled"))
             "background" -> mutable.value = mutable.value.copy(remoteBackground = payload.optBoolean("enabled"))
-            "hangup" -> {
-                resetAuthentication()
-                mutable.value = mutable.value.copy(connection = "Partner ended the call")
-            }
+            "hangup" -> partnerEnded()
             "restartRequest" -> {
                 if (offerer && mutable.value.retryAvailable) retryConnection()
                 else if (offerer && !recovering) scheduleRecovery(0)
@@ -726,14 +725,21 @@ internal class TogetherCall(private val context: Context, private val session: T
         statsSampler = CallStatsSampler(); lastDiagnostics = null
         mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false, retryAvailable = false, connectedAtMs = 0L)
     }
-    fun stop() {
+    private fun partnerEnded() {
+        stopCall(notifyPartner = false)
+        mutable.value = mutable.value.copy(connection = "Partner ended the call")
+    }
+
+    fun stop() = stopCall(notifyPartner = true)
+
+    private fun stopCall(notifyPartner: Boolean) {
         main.removeCallbacks(networkChanged)
         if (monitoringNetwork) {
             connectivity.unregisterNetworkCallback(networkCallback)
             monitoringNetwork = false
         }
         checkedNetwork = null
-        if (mutable.value.active) sendAuthenticated(JSONObject().put("type", "hangup"))
+        if (notifyPartner && mutable.value.active) sendAuthenticated(JSONObject().put("type", "hangup"))
         mutable.value = mutable.value.copy(active = false)
         torch(false)
         stopScreenShare()
