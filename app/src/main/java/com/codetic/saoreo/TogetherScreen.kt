@@ -274,7 +274,8 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     var showNetflix by remember { mutableStateOf(false) }
     TogetherWindow(fullscreen, callView) { fullMovie = false }
     var showMedia by remember { mutableStateOf(false) }
-    var showIptv by remember { mutableStateOf(false) }
+    var showIptvSetup by remember(room.room) { mutableStateOf(false) }
+    var localIptvView by remember(room.room) { mutableStateOf(IptvBrowse()) }
     var showOutput by remember { mutableStateOf(false) }
     var showRoomOptions by remember { mutableStateOf(false) }
     var showPrivateSource by remember { mutableStateOf(false) }
@@ -494,7 +495,8 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                         Box(Modifier.weight(1f).fillMaxHeight()
                             .then(if (showMovieCameras) Modifier.clip(movieShape).border(1.dp, Color(0xFF373141), movieShape) else Modifier)
                             .background(Color.Black).clipToBounds()) {
-                            TogetherVideo(context, room, session, playback, localSource, Modifier.fillMaxSize())
+                            TogetherVideo(context, room, session, playback, localSource, Modifier.fillMaxSize(),
+                                onIptvSetup = { showIptvSetup = true })
                             if (!callView && media.kind == "youtube") {
                                 if (!room.wanted && playback.position < 1_500) {
                                     coil.compose.AsyncImage(
@@ -508,7 +510,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
                                         color = Color.White, style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                            if (!callView) {
+                            if (!callView && (media.kind != "iptv" || playback.ready)) {
                                 TogetherVideoGestures(playback, session,
                                     canControl && !playback.live && (fullscreen || media.kind != "youtube"),
                                     Modifier.matchParentSize(), onTap = {
@@ -767,7 +769,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
         onDismiss = { showMedia = false },
         onYouTube = { showMedia = false; browseYouTube = true },
         onNetflix = { showMedia = false; showNetflix = true },
-        onIptv = { showMedia = false; showIptv = true },
+        onIptv = {
+            showMedia = false
+            if (!session.browseIptv(IptvBrowse())) showIptvSetup = true
+        },
         onPickFile = {
             showMedia = false
             activity?.showingExternalPicker = true
@@ -775,9 +780,16 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
         },
         onChoose = { item -> session.setMedia(item, queueNew); showMedia = false },
     )
-    if (showIptv) IptvPlaylistPicker(onClose = { showIptv = false }) { item ->
-        session.setMedia(item, queueNew).also { if (it) showIptv = false }
-    }
+    if (room.iptvBrowse != null || showIptvSetup) IptvPlaylistPicker(
+        catalog = session.iptv,
+        shared = room.iptvBrowse ?: localIptvView,
+        onNavigate = { if (!session.browseIptv(it)) localIptvView = it },
+        onClose = {
+            showIptvSetup = false
+            if (room.iptvBrowse != null) session.browseIptv(null)
+        },
+        onSelect = { item -> session.setMedia(item, queueNew).also { if (it) showIptvSetup = false } },
+    )
     val gameKind = gameState.gameKind()
     if (!showGames && gameKind != null && gameState.optString("phase") == "inviting" &&
         gameState.optString("inviter") != room.member) {
@@ -826,6 +838,10 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
             trailingContent = { Switch(room.wait, { session.send("wait", JSONObject().put("enabled", it)) }) })
         if (calling.active) TextButton({ showRoomOptions = false; showOutput = true }, Modifier.padding(horizontal = 16.dp)) { Text("Audio output") }
         if (calling.camera) TextButton({ call.flip(); showRoomOptions = false }, Modifier.padding(horizontal = 16.dp)) { Text("Switch camera") }
+        if (room.media?.kind == "iptv") TextButton({
+            showRoomOptions = false
+            showIptvSetup = true
+        }, Modifier.padding(horizontal = 16.dp)) { Text("IPTV source on this phone") }
         if (room.media?.kind == "stream") TextButton({ showRoomOptions = false; showPrivateSource = true }, Modifier.padding(horizontal = 16.dp)) { Text("Set this phone's private stream URL") }
         if (room.members.firstOrNull { it.id == room.member }?.ordinal == 0) TextButton({ session.send("resetPartner"); showRoomOptions = false }, Modifier.padding(horizontal = 16.dp)) { Text("Reset partner slot and invitation") }
         Text("Calls stop when you leave this screen. Netflix app control is not supported. Live IPTV timing depends on the provider.", Modifier.padding(20.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1105,7 +1121,7 @@ private fun MediaChooser(onDismiss: () -> Unit, onYouTube: () -> Unit, onNetflix
                 } else error = "Use a YouTube link or a direct HTTPS media URL. Netflix playback cannot be controlled here."
             }, Modifier.fillMaxWidth(), enabled = input.isNotBlank()) { Icon(Icons.Outlined.PlayArrow, null); Text("Select stream") }
             OutlinedButton(onPickFile, Modifier.fillMaxWidth()) { Icon(Icons.Outlined.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Choose a local video") }
-            Text("Local videos stream from the source phone while it stays in the room. Private IPTV credentials can be entered separately on each phone after loading the program.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Local videos stream from the source phone while it stays in the room. To watch IPTV together, add the same catalog on both phones.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

@@ -53,10 +53,10 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/together/api/rooms', json=dict(key=KEY, name='A'))
         self.assertEqual(200, response.status)
         return await response.json()
-    async def attach(self, ticket):
+    async def attach(self, ticket, protocol=2):
         ws = await self.client.ws_connect('/together/ws')
         self.sockets.append(ws)
-        await ws.send_json(dict(room=ticket['room'], token=ticket['token'], protocol=2))
+        await ws.send_json(dict(room=ticket['room'], token=ticket['token'], protocol=protocol))
         await self.event(ws, 'state')
         return ws
     async def event(self, ws, kind, predicate=lambda x: True):
@@ -64,11 +64,11 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
             while True:
                 data = await ws.receive_json()
                 if data.get('type') == kind and predicate(data): return data
-    async def pair(self):
+    async def pair(self, protocol=2):
         a = await self.ticket()
         response = await self.client.post('/together/api/join', json=dict(invite=a['invite'], name='B'))
         b = await response.json()
-        return a, b, await self.attach(a), await self.attach(b)
+        return a, b, await self.attach(a, protocol), await self.attach(b, protocol)
 
     async def test_private_access_and_two_person_limit(self):
         response = await self.client.post('/together/api/rooms', json=dict(key='wrong'))
@@ -80,6 +80,20 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(409, response.status)
         response = await self.client.post('/together/api/join', json=dict(invite=a['room'] + '.wrong'))
         self.assertEqual(404, response.status)
+
+    async def test_both_participants_can_navigate_and_select_iptv(self):
+        _, _, a, b = await self.pair(protocol=4)
+        ref = 'c' * 64
+        await a.send_json(dict(type='iptvBrowse', view=dict(kind='MOVIE', category='', focused='')))
+        await self.event(b, 'state', lambda s: (s['iptvBrowse'] or {}).get('kind') == 'MOVIE')
+        await b.send_json(dict(type='iptvBrowse', view=dict(kind='MOVIE', category='', focused=ref)))
+        await self.event(a, 'state', lambda s: (s['iptvBrowse'] or {}).get('focused') == ref)
+        await a.send_json(dict(type='media', seq=1, media=dict(kind='iptv', source='http://provider/private')))
+        await self.event(a, 'error')
+        await b.send_json(dict(type='media', seq=1, media=dict(kind='iptv', source=ref)))
+        selected = await self.event(a, 'state', lambda s: s['media'] is not None)
+        self.assertEqual(ref, selected['media']['source'])
+        self.assertIsNone(selected['iptvBrowse'])
 
     async def test_mutual_play_pause_seek_and_duplicate_order(self):
         a,b,wa,wb = await self.pair()

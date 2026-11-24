@@ -38,7 +38,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
-    packaging { jniLibs.useLegacyPackaging = true }
+    packaging {
+        jniLibs.useLegacyPackaging = true
+        resources.merges += setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/NOTICE")
+    }
     sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 }
 
@@ -78,6 +81,8 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-video:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.apache.httpcomponents.client5:httpclient5:5.4.4")
+    runtimeOnly("org.slf4j:slf4j-nop:1.7.36")
     implementation("io.getstream:stream-webrtc-android:1.3.9")
     implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:13.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

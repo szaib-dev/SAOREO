@@ -30,7 +30,7 @@ internal data class RoomAnswer(val request: RoomRequest, val accepted: Boolean)
 private fun JSONObject.roomRequest() = RoomRequest(getString("id"), getString("kind"),
     getString("sender"), getString("recipient"), getLong("expires"))
 
-internal data class TogetherState(val connected: Boolean = false, val connecting: Boolean = false, val room: String = "",
+internal data class TogetherState(val iptvBrowse: IptvBrowse? = null, val connected: Boolean = false, val connecting: Boolean = false, val room: String = "",
     val member: String = "", val invite: String = "", val error: String? = null, val revision: Long = -1,
     val members: List<TogetherMember> = emptyList(), val media: TogetherMedia? = null, val queue: List<TogetherMedia> = emptyList(),
     val timeline: SharedTimeline = SharedTimeline(0, 0, false), val wanted: Boolean = false, val wait: Boolean = true,
@@ -45,6 +45,7 @@ internal val TogetherState.canStartPlayback: Boolean
         members.all { it.online && it.ready }
 
 internal class TogetherSession(application: Application) : AndroidViewModel(application) {
+    val iptv = TogetherIptvCatalog(application)
     private val ownedCall = lazy { TogetherCall(application, this) }
     val callController get() = ownedCall.value
     val games = TogetherGames(application) { type, fields -> send(type, fields) }
@@ -164,6 +165,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         ?.let { JSONObject().put("room", it.room).put("roomToken", token) }
 
     private fun attach(base: String, ticket: JSONObject, kind: PairKind?) {
+        iptv.allowHttp = false
         latencyAverage = null
         endpoint = base
         token = ticket.getString("token")
@@ -188,7 +190,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                     if (run != generation || leaving) { webSocket.close(1000, null); return@launch }
                     seq = 0
                     lastPong = SystemClock.elapsedRealtime()
-                    val hello = JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 3).put("games", 1)
+                    val hello = JSONObject().put("room", mutable.value.room).put("token", token).put("protocol", 4).put("games", 1)
                     if (callOnReconnect?.invoke() == false) hello.put("callActive", false)
                     webSocket.send(hello.toString())
                     heartbeat?.cancel()
@@ -285,6 +287,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
                     reconnectAttempts = 0
                     mutable.value = old.copy(connected = true, connecting = false, revision = rev, members = members,
                         request = json.optJSONObject("request")?.roomRequest(),
+                        iptvBrowse = json.optJSONObject("iptvBrowse")?.let(IptvBrowse::read),
                         media = json.optJSONObject("media")?.let(::media), queue = json.getJSONArray("queue").objects().map(::media),
                         timeline = SharedTimeline(json.getDouble("position").toLong(), json.getLong("serverTime"), json.getBoolean("playing")),
                         wanted = json.getBoolean("wanted"), wait = json.getBoolean("wait"),
@@ -331,9 +334,12 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
             send(if (room.autoAdvanceQueue) "finished" else "pause")
         }
     }
+    fun browseIptv(view: IptvBrowse?) = send("iptvBrowse", JSONObject().put("view", view?.json() ?: JSONObject.NULL))
+
     fun setMedia(item: TogetherMedia, queue: Boolean = false) = send(if (queue) "queueAdd" else "media", JSONObject().put("media", item.json()))
     fun leave() {
         enterRequest?.cancel()
+        iptv.allowHttp = false
         send("leave")
         sharedFiles.clear()
         roomCallSecret = null

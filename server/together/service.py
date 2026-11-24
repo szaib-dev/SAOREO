@@ -31,6 +31,8 @@ def number(value, low=0, high=604800000):
         raise ValueError('Invalid number')
     return max(low, min(high, value))
 
+IPTV_REF = r'(?:[a-f0-9]{64}|x-[a-f0-9]{64}-(?:live|movie|series)-[0-9]{1,19}|x-[a-f0-9]{64}-episode-[0-9]{1,19}-[0-9]{1,19})'
+
 def media_item(data):
     kind = data.get('kind')
     source = str(data.get('source', ''))
@@ -41,6 +43,9 @@ def media_item(data):
         u = urlsplit(source)
         if u.scheme != 'https' or not u.hostname or u.username or u.password or len(source) > 4096:
             raise ValueError('Use an HTTPS stream without credentials. Private sources stay on your phone.')
+    elif kind == 'iptv':
+        if not re.fullmatch(IPTV_REF, source):
+            raise ValueError('Invalid IPTV program')
     elif kind == 'local':
         if not re.fullmatch(r'[a-f0-9]{64}', source):
             raise ValueError('Invalid local file fingerprint')
@@ -77,6 +82,7 @@ class Room:
     invitation: str
     members: dict = field(default_factory=dict)
     media: object = None
+    iptv_browse: object = None
     queue: list = field(default_factory=list)
     chat: deque = field(default_factory=lambda: deque(maxlen=80))
     request: object = None
@@ -111,7 +117,7 @@ class Room:
         return dict(type='state', room=self.id, revision=self.revision, serverTime=stamp,
                     position=self.position_at(stamp), playing=self.playing, wanted=self.wanted,
                     wait=self.wait, callFullscreen=self.call_fullscreen, media=self.media, queue=self.queue, request=self.request,
-                    autoAdvanceQueue=True,
+                    autoAdvanceQueue=True, iptvBrowse=self.iptv_browse,
                     members=[dict(id=m.id, name=m.name, ordinal=m.ordinal, online=m.ws is not None,
                                   ready=m.ready, buffering=m.buffering, call=m.call, mic=m.mic,
                                   camera=m.camera, slowConnection=m.slow_connection) for m in self.members.values()])
@@ -316,6 +322,26 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
                 if peer.id != m.id and peer.ws is not None and peer.call and m.call:
                     await peer.ws.send_json(dict(type='signal', sender=m.id, payload=payload))
             return
+        if op == 'iptvBrowse':
+            self.limit(('iptvBrowse', room.id, m.id), 60, 10)
+            if any(peer.ws is not None and peer.protocol < 4 for peer in room.members.values()):
+                raise ValueError('Update both phones to browse IPTV together')
+            view = data.get('view')
+            if view is None:
+                room.iptv_browse = None
+            else:
+                if not isinstance(view, dict):
+                    raise ValueError('Invalid IPTV browse view')
+                kind, category, focused = (view.get(key) for key in ('kind', 'category', 'focused'))
+                anchor = view.get('anchor', '')
+                if kind not in ('', 'LIVE', 'MOVIE', 'SERIES') or not isinstance(category, str) or not (
+                    category == '' or re.fullmatch(r'[a-f0-9]{64}', category)
+                ) or not all(isinstance(ref, str) and (ref == '' or re.fullmatch(IPTV_REF, ref)) for ref in (focused, anchor)):
+                    raise ValueError('Invalid IPTV browse view')
+                room.iptv_browse = dict(kind=kind, category=category, focused=focused, anchor=anchor)
+            room.settle()
+            await self.broadcast(room, room.snapshot())
+            return
         if op == 'chat':
             text = clean(data.get('text', ''), 2000)
             if text:
@@ -381,6 +407,12 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             else: room.position = number(data.get('position'))
         elif op in ('media', 'queueAdd'):
             item = media_item(data.get('media', {}))
+            if item['kind'] == 'iptv':
+                if '-series-' in item['source']:
+                    raise ValueError('Select a series episode')
+                if any(p.ws is not None and p.protocol < 4 for p in room.members.values()):
+                    raise ValueError('Update both phones to watch IPTV together')
+                item['title'] = 'IPTV program'
             if item['kind'] == 'relay' and (not self.relay.valid(room, item['source']) or any(p.ws is not None and p.protocol < 3 for p in room.members.values())):
                 raise ValueError('Update both phones to SAOREO 2.9.2 and reselect the local video')
             if item['kind'] == 'upload' and self.uploads.get(item['source'], (None,))[0] != room.id:
@@ -397,6 +429,8 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             else:
                 if len(room.queue) >= 20: raise ValueError('Queue is full')
                 room.queue.append(item)
+            if item['kind'] == 'iptv':
+                room.iptv_browse = None
         elif op == 'finished':
             room.wanted = bool(room.queue)
             if room.wanted:
@@ -433,6 +467,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             room.wait = data.get('enabled') is True
         elif op == 'resetPartner':
             if m.ordinal != 0: raise ValueError('Only the room creator can reset the partner slot')
+            room.iptv_browse = None
             for mid, peer in list(room.members.items()):
                 if mid != m.id:
                     if peer.ws is not None: await peer.ws.close(code=4001, message=b'Partner slot reset by host')
@@ -441,6 +476,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             room.wanted = False
             await m.ws.send_json(dict(type='invite', invite=room.id + '.' + room.invitation))
         elif op == 'leave':
+            room.iptv_browse = None
             socket = m.ws
             self.relay.disconnected(m)
             room.call_fullscreen = False
@@ -475,7 +511,11 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
             if not room: raise ValueError('Room expired')
             member = next((m for m in room.members.values() if hmac.compare_digest(m.token, str(hello.get('token', '')))), None)
             if not member: raise ValueError('Invalid room session')
-            member.protocol = int(number(hello.get('protocol', 1), low=1, high=3))
+            member.protocol = int(number(hello.get('protocol', 1), low=1, high=4))
+            if room.media and room.media['kind'] == 'iptv' and member.protocol < 4:
+                await ws.send_json(dict(type='error', message='Update SAOREO to watch IPTV together'))
+                await ws.close(code=4003)
+                return ws
             if room.media and (member.protocol < 2 and room.media['kind'] == 'upload' or member.protocol < 3 and room.media['kind'] == 'relay'):
                 await ws.send_json(dict(type='error', message='Update SAOREO to play shared local videos'))
                 await ws.close(code=4003)
@@ -544,7 +584,7 @@ main{{max-width:24rem;padding:2rem}}a{{display:inline-block;background:#d5ef72;c
 
     def app(self):
         async def health(request):
-            return web.json_response(dict(status='ok', version='1.2', protocol=3, features=['rangeRelay', 'sharedFullCall', 'pairing']))
+            return web.json_response(dict(status='ok', version='1.2', protocol=4, features=['rangeRelay', 'sharedFullCall', 'pairing', 'iptvBrowse']))
         async def asset_links(request):
             return web.json_response([{
                 'relation': ['delegate_permission/common.handle_all_urls'],
