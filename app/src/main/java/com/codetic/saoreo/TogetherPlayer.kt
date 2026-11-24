@@ -89,10 +89,35 @@ internal class TogetherPlayback(
 @Composable
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal fun TogetherVideo(context: Context, room: TogetherState, session: TogetherSession, playback: TogetherPlayback,
-    localSource: String?, modifier: Modifier = Modifier) {
+    localSource: String?, modifier: Modifier = Modifier, onIptvSetup: () -> Unit = {}) {
     val media = room.media ?: return
     val lifecycle = LocalLifecycleOwner.current
-    key(media.id, localSource, playback.reload) {
+    val catalog = session.iptv
+    val isIptv = media.kind == "iptv"
+    var consent by remember(media.id, catalog.allowHttp) { mutableStateOf(false) }
+    var declined by remember(media.id) { mutableStateOf(false) }
+    var program by remember(media.id) { mutableStateOf<IptvProgram?>(null) }
+    var finding by remember(media.id) { mutableStateOf(isIptv) }
+    LaunchedEffect(media.id, catalog.entries, catalog.allowHttp, playback.reload) {
+        if (!isIptv) return@LaunchedEffect
+        finding = true
+        try {
+            program = catalog.resolve(media.source)
+            if (program?.url?.startsWith("http://") == true && !catalog.allowHttp && !declined) consent = true
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: IptvHttpConsentRequired) {
+            if (!declined) consent = true
+        } catch (_: Exception) {
+            program = null
+        } finally {
+            finding = false
+        }
+    }
+    if (consent) IptvHttpWarning(onCancel = { declined = true; consent = false },
+        onAllow = { declined = false; catalog.allowHttp = true; consent = false })
+    val iptvSource = program?.url?.takeIf { !it.startsWith("http://") || catalog.allowHttp }
+    key(media.id, localSource, playback.reload, iptvSource, if (isIptv) catalog.allowHttp else false) {
         DisposableEffect(Unit) {
             playback.reset()
             playback.youtube = media.kind == "youtube"
@@ -194,7 +219,7 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                 importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             } }, modifier = modifier.background(Color.Black))
         } else {
-            val source = localSource ?: (if (media.kind == "relay") session.localSharedSource(media.source) else null) ?: when (media.kind) {
+            val source = if (isIptv) iptvSource else localSource ?: (if (media.kind == "relay") session.localSharedSource(media.source) else null) ?: when (media.kind) {
                 "relay" -> session.sharedFileUrl(media.source)
                 "upload" -> session.uploadUrl(media.source)
                 "stream" -> media.source
@@ -203,7 +228,15 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
             if (source != null) {
                 val player = remember {
                     ExoPlayer.Builder(context).apply {
-                        if (media.kind in setOf("upload", "relay")) {
+                        if (isIptv) {
+                            setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                                androidx.media3.datasource.DataSource.Factory {
+                                    if (source.startsWith("content://")) {
+                                        IptvManifestDataSource(context, source, catalog.allowHttp)
+                                    } else IptvDataSource(catalog.allowHttp)
+                                }
+                            ))
+                        } else if (media.kind in setOf("upload", "relay")) {
                             setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
                                 androidx.media3.datasource.DefaultDataSource.Factory(context, session.uploadDataSource())
                             ))
@@ -233,15 +266,27 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                             if (ended) playback.ended = true
                             playback.ready = state == Player.STATE_READY || ended || state == Player.STATE_BUFFERING && playback.ready
                             playback.buffering = state == Player.STATE_BUFFERING
-                            playback.live = player.isCurrentMediaItemLive
+                            playback.live = player.isCurrentMediaItemLive || (isIptv && media.live && program?.hls != true)
                             if (!playback.buffering) playback.report()
                             if (ended) session.mediaFinished(media.id)
                         }
                         override fun onPlayerError(error: PlaybackException) {
-                            playback.ready = false; playback.error = "Playback failed: ${error.errorCodeName}. Check your source and access."; playback.report()
+                            playback.ready = false
+                            if (isIptv) {
+                                val needsConsent = generateSequence<Throwable>(error) { it.cause }
+                                    .any { it is IptvHttpConsentRequired }
+                                if (needsConsent && !declined) consent = true
+                                playback.error = if (needsConsent) "This IPTV stream requires HTTP approval."
+                                    else "IPTV playback failed. Check your access and the provider's connection limit."
+                            } else playback.error = "Playback failed: ${error.errorCodeName}. Check your source and access."
+                            playback.report()
                         }
                     })
-                    player.setMediaItem(MediaItem.fromUri(source)); player.prepare()
+                    val item = MediaItem.Builder().setUri(source).apply {
+                        if (isIptv && program?.hls == true) setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                    }.build()
+                    player.setMediaItem(item)
+                    player.prepare()
                     onDispose { player.release() }
                 }
                 LaunchedEffect(player, playback.qualityLimit) {
@@ -263,6 +308,15 @@ internal fun TogetherVideo(context: Context, room: TogetherState, session: Toget
                     update = { it.player = player },
                     onRelease = { it.player = null },
                     modifier = modifier.background(Color.Black))
+            } else if (isIptv) Surface(modifier) {
+                androidx.compose.foundation.layout.Column(Modifier.padding(20.dp)) {
+                    Text(if (finding) "Connecting to your IPTV catalog…"
+                        else if (program != null || declined) "This IPTV stream requires HTTP approval."
+                        else "Add the same playlist or provider on this phone to play this program.")
+                    if (!finding) androidx.compose.material3.TextButton({
+                        if (program != null || declined) consent = true else onIptvSetup()
+                    }) { Text(if (program != null || declined) "Review HTTP access" else "Set up IPTV") }
+                }
             } else Surface(modifier) { Text("Ask the source phone to select and share this video again.", Modifier.padding(24.dp)) }
         }
     }
