@@ -274,6 +274,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
     var showNetflix by remember { mutableStateOf(false) }
     TogetherWindow(fullscreen, callView) { fullMovie = false }
     var showMedia by remember { mutableStateOf(false) }
+    var showIptv by remember { mutableStateOf(false) }
     var showOutput by remember { mutableStateOf(false) }
     var showRoomOptions by remember { mutableStateOf(false) }
     var showPrivateSource by remember { mutableStateOf(false) }
@@ -766,6 +767,7 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
         onDismiss = { showMedia = false },
         onYouTube = { showMedia = false; browseYouTube = true },
         onNetflix = { showMedia = false; showNetflix = true },
+        onIptv = { showMedia = false; showIptv = true },
         onPickFile = {
             showMedia = false
             activity?.showingExternalPicker = true
@@ -773,6 +775,9 @@ internal fun TogetherScreen(session: TogetherSession, initialInvite: String, fin
         },
         onChoose = { item -> session.setMedia(item, queueNew); showMedia = false },
     )
+    if (showIptv) IptvPlaylistPicker(onClose = { showIptv = false }) { item ->
+        session.setMedia(item, queueNew).also { if (it) showIptv = false }
+    }
     val gameKind = gameState.gameKind()
     if (!showGames && gameKind != null && gameState.optString("phase") == "inviting" &&
         gameState.optString("inviter") != room.member) {
@@ -1068,7 +1073,7 @@ private fun TogetherLobby(session: TogetherSession, invitation: String, pairing:
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MediaChooser(onDismiss: () -> Unit, onYouTube: () -> Unit, onNetflix: () -> Unit,
-    onPickFile: () -> Unit, onChoose: (TogetherMedia) -> Unit) {
+    onIptv: () -> Unit, onPickFile: () -> Unit, onChoose: (TogetherMedia) -> Unit) {
     var showStream by rememberSaveable { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
     var title by rememberSaveable { mutableStateOf("") }
@@ -1081,7 +1086,8 @@ private fun MediaChooser(onDismiss: () -> Unit, onYouTube: () -> Unit, onNetflix
                 SourceOption("YouTube", "Browse and tap a video", onYouTube)
                 SourceOption("Netflix", "Open Netflix separately", onNetflix)
                 SourceOption("Local video", "Stream a video from this phone. Your partner needs no copy.", onPickFile)
-                TextButton({ showStream = true }) { Text("Direct stream or IPTV") }
+                SourceOption("M3U IPTV", "Browse channels and movies from a playlist", onIptv)
+                TextButton({ showStream = true }) { Text("Direct stream") }
                 return@Column
             }
             TextButton({ showStream = false }) { Text("All sources") }
