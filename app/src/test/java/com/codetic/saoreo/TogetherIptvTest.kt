@@ -1,39 +1,27 @@
 package com.codetic.saoreo
 
 import java.net.URI
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.*
 import org.junit.Test
 
 class TogetherIptvTest {
     @Test fun cleartextIsBlockedUntilConsentAndPreservesRangesAfterRedirect() {
-        val requests = java.util.concurrent.atomic.AtomicInteger()
-        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/redirect") { exchange ->
-            requests.incrementAndGet()
-            exchange.responseHeaders.set("Location", "/movie")
-            exchange.sendResponseHeaders(302, -1)
-            exchange.close()
-        }
-        server.createContext("/movie") { exchange ->
-            requests.incrementAndGet()
-            val ranged = exchange.requestHeaders.getFirst("Range") == "bytes=2-4"
-            val bytes = if (ranged) byteArrayOf(2, 3, 4) else byteArrayOf(0, 1, 2, 3, 4)
-            exchange.sendResponseHeaders(if (ranged) 206 else 200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
-        }
-        server.start()
-        try {
-            val uri = URI("http://127.0.0.1:${server.address.port}/redirect")
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/movie"))
+            server.enqueue(MockResponse().setResponseCode(206).setBody("234"))
+            val uri = server.url("/redirect").toUri()
             assertThrows(IptvHttpConsentRequired::class.java) { IptvNetwork.open(uri, false) }
-            assertEquals(0, requests.get())
+            assertEquals(0, server.requestCount)
             IptvNetwork.open(uri, true, "bytes=2-4").use {
                 assertEquals(206, it.status)
                 assertEquals("/movie", it.uri.path)
-                assertArrayEquals(byteArrayOf(2, 3, 4), it.body?.readBytes())
+                assertArrayEquals("234".toByteArray(), it.body?.readBytes())
             }
-            assertEquals(2, requests.get())
-        } finally {
-            server.stop(0)
+            assertEquals(2, server.requestCount)
+            assertEquals("bytes=2-4", server.takeRequest().getHeader("Range"))
+            assertEquals("bytes=2-4", server.takeRequest().getHeader("Range"))
         }
     }
 
