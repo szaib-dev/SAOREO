@@ -31,8 +31,17 @@ class RemotePlaylistTest {
         assertEquals("https://i.scdn.co/image/cover", playlist.thumbnail)
         assertNull(playlist.items.single().link)
         assertTrue(playlist.items.single().selectable)
+        assertEquals("Song", playlist.items.single().musicTitle)
+        assertEquals("Artist", playlist.items.single().musicArtist)
         assertEquals(215.0, playlist.items.single().duration!!, 0.0)
         assertTrue(playlist.notice!!.contains("part of a long playlist"))
+    }
+
+    @Test fun youtubeUsesMusicCreditsAndTopicChannelsRatherThanUploaders() {
+        assertEquals("Performer", JSONObject().put("artists", JSONArray().put("Performer"))
+            .put("channel", "Uploader").youtubeMusicArtist())
+        assertEquals("Performer", JSONObject().put("channel", "Performer - Topic").youtubeMusicArtist())
+        assertNull(JSONObject().put("channel", "Uploader").youtubeMusicArtist())
     }
 
     @Test fun spotifyUrlRejectsOtherOriginsAndCredentials() {

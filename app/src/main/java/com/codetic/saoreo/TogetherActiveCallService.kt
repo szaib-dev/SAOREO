@@ -26,7 +26,8 @@ class TogetherActiveCallService : Service() {
             promote(projection != null || call.state.value.sharing)
             activeService = this
             if (projection != null) call.shareScreen(projection)
-            else if (intent.action == "start") call.start(intent.getBooleanExtra("video", false))
+            else if (intent.action == "start") call.start(intent.getBooleanExtra("video", false),
+                !intent.getBooleanExtra("muted", false), intent.getBooleanExtra("speaker", false))
         } catch (_: RuntimeException) {
             if (projection != null) call.reportError("Couldn't start screen sharing. Open the call and try again.")
             else { call.stop(); call.reportError("Couldn't enable the microphone for the call. Open Together and try again."); stopSelf(startId) }
@@ -45,8 +46,13 @@ class TogetherActiveCallService : Service() {
         val hangup = PendingIntent.getService(this, 1, Intent(this, javaClass).setAction("hangup"), flags)
         val notice = Notification.Builder(this, channel).setSmallIcon(R.drawable.ic_call_ongoing_notification)
             .setContentTitle(if (sharing) "Sharing your screen" else "Together call in progress")
+            .setColor(TOGETHER_NOTIFY_LIME)
             .setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_CALL)
-            .addAction(Notification.Action.Builder(null, "End call", hangup).build()).build()
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setStyle(Notification.CallStyle.forOngoingCall(
+                PairedChatNotifications.partner(this, (application as SaoreoApp).pairing.state.value.partner ?: "Together call"),
+                hangup).setDeclineButtonColorHint(0xffff4f51.toInt()))
+            .build()
         val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
             (if (cameraAllowed) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0) or
             (if (sharing) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
@@ -64,14 +70,22 @@ class TogetherActiveCallService : Service() {
     }
 
     companion object {
+        private val callInProgress = kotlinx.coroutines.flow.MutableStateFlow(false)
+        internal val inCall: kotlinx.coroutines.flow.StateFlow<Boolean> = callInProgress
         private var owner: TogetherCall? = null
+            set(value) {
+                field = value
+                callInProgress.value = value != null
+            }
         private var activeService: TogetherActiveCallService? = null
 
-        internal fun begin(context: Context, call: TogetherCall, cameraAllowed: Boolean, video: Boolean): Boolean {
+        internal fun begin(context: Context, call: TogetherCall, cameraAllowed: Boolean, video: Boolean, muted: Boolean = false, speaker: Boolean = false): Boolean {
+            if (owner != null && owner !== call) return false
             owner = call
             return runCatching {
                 ContextCompat.startForegroundService(context, Intent(context, TogetherActiveCallService::class.java)
-                    .setAction("start").putExtra("cameraAllowed", cameraAllowed).putExtra("video", video))
+                    .setAction("start").putExtra("cameraAllowed", cameraAllowed).putExtra("video", video)
+                    .putExtra("muted", muted).putExtra("speaker", speaker))
             }.isSuccess.also { if (!it) owner = null }
         }
 

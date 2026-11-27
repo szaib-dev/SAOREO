@@ -1,7 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -66,12 +70,17 @@
             android:foregroundServiceType="mediaPlayback">
             <intent-filter><action android:name="androidx.media3.session.MediaSessionService" /></intent-filter>
         </service>
+        <receiver android:name=".PairedChatActionReceiver" android:exported="false" />
         <receiver android:name=".DownloadActionReceiver" android:exported="false" />
         <service android:name=".TranscriptService" android:exported="false"
             android:foregroundServiceType="mediaProcessing|dataSync" />
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.transcripts"
             android:exported="false" android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/transcript_paths" />
+        </provider>
+        <provider android:name=".PairedMediaProvider" android:authorities="${applicationId}.pairedmedia"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/paired_media_paths" />
         </provider>
         <service android:name=".ConversionService" android:exported="false"
             android:foregroundServiceType="mediaProcessing|dataSync" />

@@ -185,6 +185,8 @@ interface DownloadDao {
     suspend fun find(id: String): Download?
     @Query("SELECT * FROM downloads WHERE state IN ('QUEUED','RESOLVING','DOWNLOADING') AND source = :source")
     suspend fun activeFor(source: String): List<Download>
+    @Query("SELECT EXISTS(SELECT 1 FROM downloads WHERE galleryUri = :uri AND id != :id)")
+    suspend fun hasOtherFileReference(uri: String, id: String): Boolean
     @Query("SELECT * FROM downloads WHERE galleryUri = :uri AND state = 'COMPLETE' LIMIT 1") suspend fun byUri(uri: String): Download?
     @Query("SELECT * FROM downloads WHERE state = 'COMPLETE' AND mime LIKE 'audio/%' ORDER BY created DESC")
     fun audio(): Flow<List<Download>>

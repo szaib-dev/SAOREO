@@ -63,7 +63,9 @@ internal interface CollectionDao {
     suspend fun setPlaylistPosition(id: String, position: Int)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun add(track: PlaylistTrack)
     @Query("DELETE FROM playlist_tracks WHERE playlist = :playlist AND song = :song") suspend fun remove(playlist: String, song: String)
-    @Query("SELECT * FROM playlist_tracks ORDER BY added") fun tracks(): Flow<List<PlaylistTrack>>
+    @Query("UPDATE playlist_tracks SET added = :position WHERE playlist = :playlist AND song = :song")
+    suspend fun setTrackPosition(playlist: String, song: String, position: Long)
+    @Query("SELECT * FROM playlist_tracks ORDER BY added, song") fun tracks(): Flow<List<PlaylistTrack>>
     @Query("SELECT * FROM song_state") fun songStates(): Flow<List<SongState>>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun init(state: SongState)
     @Query("UPDATE song_state SET liked = NOT liked WHERE song = :song") suspend fun toggleLike(song: String)
@@ -122,6 +124,9 @@ internal class Collections(private val app: SaoreoApp) {
         val current = dao.orderedPlaylistIds()
         val order = (ids.filter { it in current } + current).distinct()
         order.forEachIndexed { index, id -> dao.setPlaylistPosition(id, index) }
+    }
+    suspend fun reorderTracks(playlist: String, order: List<String>) = app.database.withTransaction {
+        order.forEachIndexed { position, song -> dao.setTrackPosition(playlist, song, position.toLong()) }
     }
     suspend fun addSong(playlist: String, song: Download) {
         require(song.mime?.startsWith("audio/") == true && song.state == JobState.COMPLETE.name)

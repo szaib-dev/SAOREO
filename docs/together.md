@@ -12,7 +12,7 @@ Native two-person watch rooms, introduced in 2.8.0. Open **Home → Better, toge
 
 Calls are foreground-only in this version. Leaving/backgrounding the screen ends this device's call and pauses shared playback. Return and rejoin the call. Rooms reconnect after transient socket loss, with playback paused until resumed.
 
-YouTube uses its official embedded player via android-youtube-player; provider controls/ads remain present. Restricted embedding, sign-in requirements, ads, and device/provider restrictions may prevent a particular video from playing or disrupt timing. No Netflix app control or screen sharing is implemented. IPTV requires authorized direct streams; DRM license provisioning is not implemented. Live-stream synchronization is best effort because independent streams can have different live windows; VOD supports shared seeking. Each participant can set a private stream URL for the same program in room settings; that override remains on their phone.
+YouTube uses its official embedded player via android-youtube-player; provider controls/ads remain present. Restricted embedding, sign-in requirements, ads, and device/provider restrictions may prevent a particular video from playing or disrupt timing. No Netflix app control or screen sharing is implemented. Live-stream synchronization is best effort because independent streams can have different live windows; VOD supports shared seeking. Each participant can set a private stream URL for the same program in room settings; that override remains on their phone.
 
 ## Server
 

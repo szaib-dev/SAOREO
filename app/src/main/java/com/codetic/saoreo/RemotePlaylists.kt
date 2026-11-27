@@ -8,7 +8,8 @@ import java.io.IOException
 import java.net.URI
 
 internal data class RemotePlaylistItem(val key: Int, val title: String, val link: MediaLink?,
-    val artist: String = "", val thumbnail: String? = null, val duration: Double? = null, val spotifyUrl: String? = null) {
+    val artist: String = "", val thumbnail: String? = null, val duration: Double? = null,
+    val spotifyUrl: String? = null, val musicArtist: String? = null, val musicTitle: String? = null) {
     val selectable get() = link != null || spotifyUrl != null
 }
 internal data class RemotePlaylist(val title: String, val thumbnail: String?, val items: List<RemotePlaylistItem>,
@@ -25,6 +26,16 @@ internal fun spotifyPlaylistUrl(text: String): String? {
     }
 }
 
+internal fun JSONObject.musicField(name: String): String? =
+    optString(name).trim().take(240).takeUnless { it.isBlank() || it == "NA" || it == "null" }
+
+internal fun JSONObject.youtubeMusicArtist(): String? {
+    val artists = optJSONArray("artists")
+    val channel = musicField("channel") ?: musicField("uploader")
+    return musicField("artist") ?: artists?.optString(0)?.takeIf(String::isNotBlank)
+        ?: channel?.takeIf { it.endsWith(" - Topic") }?.removeSuffix(" - Topic")
+}
+
 internal fun youtubePlaylist(root: JSONObject, sourceUrl: String): RemotePlaylist {
     val entries = root.optJSONArray("entries")
     val items = (0 until (entries?.length() ?: 0)).map { index ->
@@ -35,7 +46,8 @@ internal fun youtubePlaylist(root: JSONObject, sourceUrl: String): RemotePlaylis
             title !in setOf("[Private video]", "[Deleted video]")
         RemotePlaylistItem(index, title, if (available) MediaLink("https://www.youtube.com/watch?v=$id", Source.YOUTUBE) else null,
             row?.optString("uploader").orEmpty(), id?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" },
-            row?.optDouble("duration")?.takeIf { it.isFinite() && it > 0 })
+            row?.optDouble("duration")?.takeIf { it.isFinite() && it > 0 },
+            musicArtist = row?.youtubeMusicArtist(), musicTitle = row?.musicField("track"))
     }
     val thumbs = root.optJSONArray("thumbnails")
     return RemotePlaylist(root.optString("title").ifBlank { "YouTube playlist" }.take(80),
@@ -54,8 +66,11 @@ internal fun spotifyPlaylist(html: String, sourceUrl: String): RemotePlaylist {
     val items = (0 until tracks.length()).map { index ->
         val track = tracks.getJSONObject(index)
         val id = track.optString("uri").removePrefix("spotify:track:").takeIf { it.matches(Regex("[A-Za-z0-9]{22}")) }
-        RemotePlaylistItem(index, track.optString("title").take(240), null, track.optString("subtitle").take(240), cover,
-            track.optDouble("duration").takeIf { it.isFinite() && it > 0 }?.div(1000), id?.let { "https://open.spotify.com/track/$it" })
+        val title = track.optString("title").take(240)
+        val artist = track.musicField("subtitle").orEmpty()
+        RemotePlaylistItem(index, title, null, artist, cover,
+            track.optDouble("duration").takeIf { it.isFinite() && it > 0 }?.div(1000), id?.let { "https://open.spotify.com/track/$it" },
+            musicArtist = artist.takeIf(String::isNotBlank), musicTitle = title.takeIf(String::isNotBlank))
     }
     return RemotePlaylist(entity.optString("name").ifBlank { entity.optString("title", "Spotify playlist") }.take(80), cover, items, sourceUrl,
         "Selected songs download from YouTube matches, which may be different recordings. Spotify's public embed may expose only part of a long playlist; only the tracks shown here will be imported.")

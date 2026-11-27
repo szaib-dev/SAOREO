@@ -48,19 +48,27 @@ internal fun identifyLyricsMetadata(title: String, artist: String?, album: Strin
     var clean = title.replace(Regex("(?i)\\.(mp3|m4a|flac|wav|ogg|opus)$"), "")
         .replace(Regex("(?i)\\s*[\\[(](?:official\\s+)?(?:audio|music video|video|lyric video|lyrics|hd|hq|4k|4k remaster|4k remastered)[\\])]"), "")
         .trim()
-    var performer = artist?.trim()?.takeUnless { it.isBlank() || it.equals("Unknown artist", true) || it == "<unknown>" }
+    var performer = artist?.trim()?.removeSuffix(" - Topic")
+        ?.takeUnless { it.isBlank() || it.equals("Unknown artist", true) || it == "<unknown>" }
     val parts = clean.split(Regex("\\s+[-\u2013\u2014]\\s+"), limit = 2)
     if (parts.size == 2 && parts.all { it.isNotBlank() } &&
-        (performer == null || normalizedMusicName(parts[0]) == normalizedMusicName(performer))) {
-        performer = parts[0]
+        (performer == null || lyricsArtistMatches(performer, parts[0]))) {
+        performer = performer ?: parts[0]
         clean = parts[1]
     }
     return LyricsMetadata(clean, performer.orEmpty(), album?.takeIf(String::isNotBlank), duration)
 }
 
+internal fun lyricsPrimaryArtist(artist: String): String =
+    artist.split(Regex("(?i),\\s+|\\s+(?:feat\\.?|ft\\.?|featuring)\\s+"), limit = 2).first()
+
+private fun lyricsArtistMatches(wanted: String, found: String): Boolean =
+    normalizedMusicName(wanted) == normalizedMusicName(found) ||
+        normalizedMusicName(lyricsPrimaryArtist(wanted)) == normalizedMusicName(lyricsPrimaryArtist(found))
+
 internal fun lyricsMatch(query: LyricsMetadata, title: String, artist: String, album: String?, seconds: Double): Boolean =
-    query.title.length >= 4 && query.duration > 0 && seconds.isFinite() &&
+    query.duration > 0 && seconds.isFinite() && normalizedMusicName(query.title).isNotEmpty() &&
         normalizedMusicName(query.title) == normalizedMusicName(title) &&
-        (query.artist.isBlank() || normalizedMusicName(query.artist) == normalizedMusicName(artist)) &&
+        (query.artist.isBlank() || lyricsArtistMatches(query.artist, artist)) &&
         abs(query.duration / 1000.0 - seconds) <= 3.0 &&
         (query.album.isNullOrBlank() || normalizedMusicName(query.album) == normalizedMusicName(album.orEmpty()))

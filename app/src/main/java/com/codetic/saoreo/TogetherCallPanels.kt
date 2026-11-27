@@ -16,7 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,9 +43,11 @@ internal fun TogetherCallOptionsPanel(
     hasSelfVideo: Boolean,
     togglePreview: () -> Unit,
     showAudio: () -> Unit,
+    showVideo: () -> Unit,
     openStream: () -> Unit,
     shareScreen: () -> Unit,
     toggleTorch: () -> Unit,
+    toggleRemote: () -> Unit,
     hideControls: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -61,12 +63,57 @@ internal fun TogetherCallOptionsPanel(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionTile(if (calling.sharing) "Stop sharing" else "Share screen", R.drawable.ic_call_share_screen,
                 Modifier.weight(1f), calling.active, accent = calling.sharing, onClick = shareScreen)
+            OptionTile(if (calling.remoteMuted) "Unmute partner" else "Mute partner", R.drawable.ic_mic_off,
+                Modifier.weight(1f), calling.active, checked = calling.remoteMuted, onClick = toggleRemote)
             OptionTile("Flashlight", R.drawable.ic_call_torch, Modifier.weight(1f),
                 calling.active && calling.hasTorch, checked = calling.torch, onClick = toggleTorch)
+        }
+        OutlinedButton(showVideo, modifier = Modifier.fillMaxWidth(), border = BorderStroke(1.dp, PanelEdge)) {
+            Text("Video quality", color = PanelText, modifier = Modifier.weight(1f))
+            Text(calling.qualityMode.label, color = PanelAccent, style = MaterialTheme.typography.labelSmall)
         }
         TextButton(hideControls, modifier = Modifier.align(Alignment.CenterHorizontally),
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
             Text("Hide controls", color = PanelMuted, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+@Composable
+internal fun TogetherCallVideoPanel(
+    calling: TogetherCallState,
+    call: TogetherCall,
+    close: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var showDiagnostics by remember { mutableStateOf(false) }
+    CallPanel(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Video quality", Modifier.weight(1f), color = PanelText,
+                style = MaterialTheme.typography.titleMedium)
+            IconButton(close) { Icon(Icons.Outlined.Close, "Back to call settings", tint = PanelText) }
+        }
+        Text("Sets preferred quality for the video you send. Quality adapts during the call.",
+            color = PanelMuted, style = MaterialTheme.typography.bodySmall)
+        CallQualityMode.entries.forEach { mode ->
+            val selected = mode == calling.qualityMode
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (selected) PanelAccent.copy(alpha = .14f) else Color.Transparent)
+                .selectable(selected, role = Role.RadioButton) { call.selectVideoQuality(mode) }
+                .padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(mode.label, Modifier.weight(1f), color = PanelText)
+                if (selected) Icon(Icons.Outlined.Check, null, tint = PanelAccent)
+            }
+        }
+        HorizontalDivider(color = PanelEdge)
+        TextButton({ showDiagnostics = !showDiagnostics }) {
+            Text(if (showDiagnostics) "Hide diagnostics" else "Show diagnostics", color = PanelAccent)
+        }
+        if (showDiagnostics) {
+            val diagnostics by call.videoDiagnostics.collectAsState()
+            Text(diagnostics ?: "Waiting for media statistics", color = PanelMuted,
+                style = MaterialTheme.typography.bodySmall)
         }
     }
 }

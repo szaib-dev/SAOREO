@@ -2,6 +2,8 @@ package com.codetic.saoreo
 
 import android.content.Context
 import android.content.Intent
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.projection.MediaProjection
@@ -18,8 +20,9 @@ import org.webrtc.audio.JavaAudioDeviceModule
 internal data class TogetherCallState(val active: Boolean = false, val mic: Boolean = false, val camera: Boolean = false,
     val connection: String = "Call is off", val localVideo: VideoTrack? = null, val remoteVideo: VideoTrack? = null,
     val output: String = "Phone audio", val input: String = "System default", val sharing: Boolean = false,
-    val torch: Boolean = false, val hasTorch: Boolean = false, val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false,
+    val remoteMuted: Boolean = false, val torch: Boolean = false, val hasTorch: Boolean = false, val error: String? = null, val remoteBackground: Boolean = false, val remoteSharing: Boolean = false,
     val retryAvailable: Boolean = false, val connectedAtMs: Long = 0L,
+    val qualityMode: CallQualityMode = CallQualityMode.SMART, val mediaWarning: String? = null,
     val outputDeviceId: Int? = null, val inputDeviceId: Int? = null, val audioDeviceRevision: Int = 0)
 
 /** One peer connection per private room; signaling travels through the authenticated room socket. */
@@ -27,7 +30,13 @@ internal class TogetherCall(private val context: Context, private val session: T
     private val identity: CallIdentity = CallIdentity(context),
 ) : AutoCloseable {
     private val main = Handler(Looper.getMainLooper())
-    private val mutable = MutableStateFlow(TogetherCallState())
+    private val qualityPreferences = context.getSharedPreferences("saoreo_call_video", Context.MODE_PRIVATE)
+    private val initialQuality = CallQualityMode.entries.firstOrNull {
+        it.name == qualityPreferences.getString("mode", null)
+    } ?: CallQualityMode.SMART
+    private val mutable = MutableStateFlow(TogetherCallState(qualityMode = initialQuality))
+    private val diagnosticsState = MutableStateFlow<String?>(null)
+    val videoDiagnostics = diagnosticsState.asStateFlow()
     val state = mutable.asStateFlow()
     val egl: EglBase = EglBase.create()
     private val audioManager = context.getSystemService(AudioManager::class.java)
@@ -35,10 +44,13 @@ internal class TogetherCall(private val context: Context, private val session: T
     private val adm: JavaAudioDeviceModule
     private val factory: PeerConnectionFactory
     private val audioSource: AudioSource
+    private var remoteAudio: AudioTrack? = null
     private val audioTrack: AudioTrack
     private val videoSource: VideoSource
     private val videoTrack: VideoTrack
-    private var capturer: CameraVideoCapturer? = null
+    private var capturer: TorchCamera2Capturer? = null
+    private var cameraName: String? = null
+    private var switchingCamera = false
     private var texture: SurfaceTextureHelper? = null
     private var screenCapturer: ScreenCapturerAndroid? = null
     private var screenTexture: SurfaceTextureHelper? = null
@@ -63,7 +75,6 @@ internal class TogetherCall(private val context: Context, private val session: T
     private var waitForCallFlagsUntil = 0L
     private val checkCallFlags = Runnable { members(session.state.value) }
     private var recoveryAttempts = 0
-    private var recoveryStarted = 0L
     private var recovering = false
     private var wasConnected = false
     private var checkedNetwork: Network? = null
@@ -80,7 +91,7 @@ internal class TogetherCall(private val context: Context, private val session: T
         override fun onAvailable(network: Network) {
             main.post {
                 if (!monitoringNetwork) return@post
-                if (checkedNetwork != null && checkedNetwork != network) {
+                if (checkedNetwork != network) {
                     main.removeCallbacks(networkChanged)
                     main.postDelayed(networkChanged, 1500)
                 }
@@ -89,11 +100,46 @@ internal class TogetherCall(private val context: Context, private val session: T
         }
     }
     private var statsSampler = CallStatsSampler()
-    private var videoQuality = CallVideoQuality()
-    private var profile = CallVideoProfile.levels[3]
+    @Volatile private var capturedSize: Pair<Int, Int>? = null
     private var captureHeight = 720
-    private var fullHdCamera = false
-    private var lastDiagnostics: String? = null
+    private var captureTargetHeight = 1080
+    private val qhdEncoderAvailable by lazy {
+        val videoTypes = setOf("video/avc", "video/x-vnd.on2.vp8", "video/x-vnd.on2.vp9", "video/av01")
+        android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos.any { codec ->
+            codec.isEncoder && codec.isHardwareAccelerated && codec.supportedTypes.any { type ->
+                type in videoTypes && runCatching {
+                    codec.getCapabilitiesForType(type).videoCapabilities.areSizeAndRateSupported(2560, 1440, 24.0)
+                }.getOrDefault(false)
+            }
+        }
+    }
+    private var videoQuality = CallVideoQuality(initialQuality, captureHeight)
+    private var appliedProfile: CallVideoProfile? = null
+    private var warningSamples = 0
+
+    fun selectVideoQuality(mode: CallQualityMode) {
+        if (mode == mutable.value.qualityMode) return
+        qualityPreferences.edit().putString("mode", mode.name).apply()
+        mutable.value = mutable.value.copy(qualityMode = mode)
+        val wanted = requestedCaptureHeight()
+        capturer?.let { capture ->
+            if (wanted != captureTargetHeight) {
+                captureTargetHeight = wanted
+                capturedSize = null
+                capture.changeCaptureFormat(if (wanted == 1440) 2560 else 1920, wanted, 30)
+            }
+        }
+        resetVideoEnvelope()
+    }
+
+    private fun requestedCaptureHeight(): Int =
+        if (mutable.value.qualityMode == CallQualityMode.MAXIMUM && qhdEncoderAvailable) 1440 else 1080
+
+    private fun resetVideoEnvelope() {
+        videoQuality = CallVideoQuality(mutable.value.qualityMode, captureHeight)
+        configureVideoSender()
+    }
+
     private val sampleStats = object : Runnable {
         override fun run() {
             val pc = peer ?: return
@@ -101,19 +147,37 @@ internal class TogetherCall(private val context: Context, private val session: T
             pc.getStats { report -> main.post {
                 if (run != peerGeneration || closed) return@post
                 val stats = statsSampler.read(report)
-                lastDiagnostics = stats.diagnostic
-                if (recovering && recoveryAttempts > 0 && !negotiating && mediaConnected()) connected()
-                if (mutable.value.camera && mediaConnected()) {
-                    val next = videoQuality.update(stats, fullHdCamera)
-                    if (next != profile) {
-                        profile = next
-                        if (next.height > captureHeight) {
-                            capturer?.changeCaptureFormat(1920, 1080, 30)
-                            captureHeight = 1080
+                if (!negotiating && mediaConnected() && recovering && recoveryAttempts > 0) connected()
+                if (mutable.value.camera && screenTrack == null && mediaConnected()) {
+                    capturedSize?.let { (width, height) ->
+                        val actualHeight = minOf(width, height)
+                        if (actualHeight != captureHeight) {
+                            captureHeight = actualHeight
+                            resetVideoEnvelope()
                         }
-                        configureVideoSender()
                     }
+                    videoQuality.update(stats)
+                    if (videoQuality.profile != appliedProfile) configureVideoSender()
                 }
+                val warning = when {
+                    !mediaConnected() || !mutable.value.camera || screenTrack != null -> null
+                    stats.encoderLimited -> "This device is limiting outgoing video"
+                    stats.limitation == "bandwidth" || videoQuality.profile.height == 0 ->
+                        "Limited bandwidth for outgoing video"
+                    else -> null
+                }
+                warningSamples = if (warning == null) 0 else (warningSamples + 1).coerceAtMost(2)
+                val visibleWarning = warning.takeIf { warningSamples >= 2 }
+                if (mutable.value.mediaWarning != visibleWarning) {
+                    mutable.value = mutable.value.copy(mediaWarning = visibleWarning)
+                }
+                val capture = capturedSize?.let { (w, h) -> "${w}×$h" } ?: "Unavailable"
+                val profileLabel = when {
+                    screenTrack != null -> "Screen sharing"
+                    !mutable.value.camera -> "Camera off"
+                    else -> appliedProfile?.label ?: "Awaiting sender settings"
+                }
+                diagnosticsState.value = "Camera capture: $capture\nOutgoing profile: $profileLabel\n${stats.diagnostic}"
             } }
             main.postDelayed(this, 2000)
         }
@@ -176,12 +240,13 @@ internal class TogetherCall(private val context: Context, private val session: T
         session.callOnReconnect = { mutable.value.active }
     }
 
-    fun start(camera: Boolean) {
+    fun start(camera: Boolean, microphoneEnabled: Boolean = true, speaker: Boolean = false) {
         if (closed) return
         if (mutable.value.active) return
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        mutable.value = mutable.value.copy(active = true, mic = true, connection = "Waiting for your partner", error = null)
-        audioTrack.setEnabled(true)
+        mutable.value = mutable.value.copy(active = true, mic = microphoneEnabled, connection = "Connecting…", error = null)
+        audioTrack.setEnabled(microphoneEnabled)
+        if (speaker) selectedOutput = devices().firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }?.id
         if (camera) camera(true)
         if (!monitoringNetwork) {
             checkedNetwork = connectivity.activeNetwork
@@ -196,89 +261,164 @@ internal class TogetherCall(private val context: Context, private val session: T
         inBackground = enabled
         sendAuthenticated(JSONObject().put("type", "background").put("enabled", enabled))
     }
+    fun muteRemote(enabled: Boolean) {
+        mutable.value = mutable.value.copy(remoteMuted = enabled)
+        remoteAudio?.setEnabled(!enabled)
+    }
     fun microphone(enabled: Boolean) {
         audioTrack.setEnabled(enabled && mutable.value.active)
         mutable.value = mutable.value.copy(mic = enabled && mutable.value.active)
         announce()
     }
-    fun camera(enabled: Boolean) {
-        if (enabled && !mutable.value.active) return
+    fun previewBeforeCall(enabled: Boolean) {
+        if (!mutable.value.active && peer == null) setCamera(enabled, preview = true)
+    }
+
+    fun camera(enabled: Boolean) = setCamera(enabled)
+
+    private fun setCamera(enabled: Boolean, preview: Boolean = false) {
+        if (enabled && !mutable.value.active && !preview) return
         if (enabled && mutable.value.sharing) stopScreenShare()
         try {
             if (enabled && capturer == null) {
                 val enumerator = Camera2Enumerator(context)
                 val name = enumerator.deviceNames.firstOrNull(enumerator::isFrontFacing) ?: enumerator.deviceNames.firstOrNull()
                     ?: error("No camera is available")
-                capturer = enumerator.createCapturer(name, null) ?: error("Camera could not be opened")
-                texture = SurfaceTextureHelper.create("SAOREO-camera", egl.eglBaseContext)
-                capturer!!.initialize(texture, context, videoSource.capturerObserver)
-                fullHdCamera = enumerator.getSupportedFormats(name).orEmpty().any {
-                    maxOf(it.width, it.height) >= 1920 && minOf(it.width, it.height) >= 1080 && it.framerate.max >= 30_000
+                releaseStandaloneTorch()
+                cameraName = name
+                lateinit var capture: TorchCamera2Capturer
+                capture = TorchCamera2Capturer(context, name, object : CameraVideoCapturer.CameraEventsHandler {
+                    override fun onFirstFrameAvailable() {
+                        main.post { if (capturer === capture && !closed) updateStandaloneTorch() }
+                    }
+                    override fun onCameraOpening(cameraName: String) = Unit
+                    override fun onCameraError(errorDescription: String) {
+                        main.post {
+                            if (capturer === capture && !closed && captureTargetHeight == 1440) {
+                                captureTargetHeight = 1080
+                                capturedSize = null
+                                capture.changeCaptureFormat(1920, 1080, 30)
+                            }
+                        }
+                    }
+                    override fun onCameraDisconnected() = Unit
+                    override fun onCameraFreezed(errorDescription: String) = Unit
+                    override fun onCameraClosed() = Unit
+                }, flashCameras) {
+                    main.post { if (capturer === capture && !closed) reportError("The camera couldn't change its flashlight.") }
                 }
+                capturer = capture
+                texture = SurfaceTextureHelper.create("SAOREO-camera", egl.eglBaseContext)
+                val observer = videoSource.capturerObserver
+                capture.initialize(requireNotNull(texture), context, object : CapturerObserver by observer {
+                    override fun onFrameCaptured(frame: VideoFrame) {
+                        val width = frame.buffer.width
+                        val height = frame.buffer.height
+                        val size = capturedSize
+                        if (size?.first != width || size.second != height) capturedSize = width to height
+                        observer.onFrameCaptured(frame)
+                    }
+                })
+                capture.setTorch(mutable.value.torch)
+                // The capturer chooses a native size per lens. The measured frame size
+                // determines sender scaling once camera frames arrive.
                 captureHeight = 720
-                videoQuality = CallVideoQuality()
-                profile = CallVideoProfile.levels[3]
-                capturer!!.startCapture(1280, captureHeight, 30)
-                configureVideoSender()
+                capturedSize = null
+                resetVideoEnvelope()
+                captureTargetHeight = requestedCaptureHeight()
+                capture.startCapture(if (captureTargetHeight == 1440) 2560 else 1920, captureTargetHeight, 30)
             } else if (!enabled && capturer != null) {
+                torch(false)
                 capturer?.stopCapture(); capturer?.dispose(); capturer = null
+                capturedSize = null
                 texture?.dispose(); texture = null
+                cameraName = null
+                switchingCamera = false
             }
             videoTrack.setEnabled(enabled)
-            mutable.value = mutable.value.copy(camera = enabled, error = null)
+            mutable.value = mutable.value.copy(camera = enabled, error = null, mediaWarning = null)
         } catch (e: Exception) {
             videoTrack.setEnabled(false)
-            mutable.value = mutable.value.copy(camera = false, error = e.message ?: "Camera unavailable")
+            mutable.value = mutable.value.copy(camera = false, mediaWarning = null, error = e.message ?: "Camera unavailable")
         }
-        announce()
+        if (!preview) announce()
     }
-    private val cameraManager = context.getSystemService(android.hardware.camera2.CameraManager::class.java)
-    private val torchId = runCatching { cameraManager.cameraIdList.firstOrNull {
-        cameraManager.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-    } }.getOrNull()
-    private val torchCallback = object : android.hardware.camera2.CameraManager.TorchCallback() {
+    private val cameraManager = context.getSystemService(CameraManager::class.java)
+    private val flashCameras = runCatching {
+        cameraManager.cameraIdList.filter { id ->
+            runCatching {
+                cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            }.getOrDefault(false)
+        }.toSet()
+    }.getOrDefault(emptySet())
+    private val standaloneTorchId = flashCameras.firstOrNull { Camera2Enumerator(context).isBackFacing(it) }
+        ?: flashCameras.firstOrNull()
+    private var standaloneTorchOn = false
+    private val torchCallback = object : CameraManager.TorchCallback() {
         override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
-            if (!closed && cameraId == torchId) mutable.value = mutable.value.copy(torch = enabled)
+            if (!closed && cameraId == standaloneTorchId && !enabled) {
+                standaloneTorchOn = false
+                updateStandaloneTorch()
+            }
         }
         override fun onTorchModeUnavailable(cameraId: String) {
-            if (!closed && cameraId == torchId) mutable.value = mutable.value.copy(torch = false)
+            if (cameraId == standaloneTorchId) standaloneTorchOn = false
         }
     }
     init {
-        mutable.value = mutable.value.copy(hasTorch = torchId != null)
+        mutable.value = mutable.value.copy(hasTorch = flashCameras.isNotEmpty())
         cameraManager.registerTorchCallback(torchCallback, main)
     }
     fun torch(enabled: Boolean) {
-        val id = torchId ?: return
-        runCatching { cameraManager.setTorchMode(id, enabled) }
-            .onSuccess { mutable.value = mutable.value.copy(torch = enabled) }
-            .onFailure { if (enabled) reportError("Torch is unavailable while this camera is in use. Try the front camera.") }
+        if (enabled && (!mutable.value.active || !mutable.value.hasTorch)) return
+        mutable.value = mutable.value.copy(torch = enabled)
+        capturer?.setTorch(enabled)
+        if (enabled) updateStandaloneTorch() else releaseStandaloneTorch()
+    }
+    private fun updateStandaloneTorch() {
+        val id = standaloneTorchId ?: return
+        if (!mutable.value.active || !mutable.value.torch || switchingCamera || cameraName in flashCameras || standaloneTorchOn) return
+        standaloneTorchOn = runCatching { cameraManager.setTorchMode(id, true) }.isSuccess
+    }
+    private fun releaseStandaloneTorch() {
+        if (standaloneTorchOn) {
+            runCatching { cameraManager.setTorchMode(requireNotNull(standaloneTorchId), false) }
+            standaloneTorchOn = false
+        }
     }
     fun flip() {
-        torch(false)
         val camera = capturer ?: return
+        val current = cameraName ?: return
+        if (switchingCamera) return
+        val enumerator = Camera2Enumerator(context)
+        val candidates = enumerator.deviceNames.filter { it != current }
+        val target = if (enumerator.isFrontFacing(current))
+            candidates.firstOrNull { enumerator.isBackFacing(it) && it in flashCameras }
+                ?: candidates.firstOrNull(enumerator::isBackFacing) ?: candidates.firstOrNull()
+        else candidates.firstOrNull(enumerator::isFrontFacing) ?: candidates.firstOrNull()
+        if (target == null) return
+        switchingCamera = true
+        releaseStandaloneTorch()
         camera.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFrontCamera: Boolean) {
                 main.post {
                     if (capturer !== camera || closed) return@post
-                    val enumerator = Camera2Enumerator(context)
-                    val names = enumerator.deviceNames.filter { enumerator.isFrontFacing(it) == isFrontCamera }
-                    fullHdCamera = names.size == 1 && enumerator.getSupportedFormats(names.single()).orEmpty().any {
-                        maxOf(it.width, it.height) >= 1920 && minOf(it.width, it.height) >= 1080 && it.framerate.max >= 30_000
-                    }
-                    if (!fullHdCamera && captureHeight > 720) {
-                        captureHeight = 720
-                        profile = CallVideoProfile.levels[3]
-                        videoQuality = CallVideoQuality()
-                        camera.changeCaptureFormat(1280, 720, 30)
-                        configureVideoSender()
-                    }
+                    switchingCamera = false
+                    cameraName = target
+                    camera.setTorch(mutable.value.torch)
+                    updateStandaloneTorch()
+                    // The frame observer supplies the new lens size without another camera restart.
                 }
             }
             override fun onCameraSwitchError(errorDescription: String) {
-                main.post { if (!closed) reportError(errorDescription) }
+                main.post {
+                    if (capturer !== camera || closed) return@post
+                    switchingCamera = false
+                    updateStandaloneTorch()
+                    reportError(errorDescription)
+                }
             }
-        })
+        }, target)
     }
     fun devices(): List<AudioDeviceInfo> = audioManager.availableCommunicationDevices
     fun inputs(): List<AudioDeviceInfo> = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).filter {
@@ -368,7 +508,8 @@ internal class TogetherCall(private val context: Context, private val session: T
             else {
                 if (authentication != null || peer != null) resetAuthentication()
                 if (mutable.value.connection != "Partner ended the call") {
-                    mutable.value = mutable.value.copy(connection = "Waiting for your partner")
+                    mutable.value = mutable.value.copy(connection =
+                        if (room.pairedCallId != null) "Connecting…" else "Waiting for your partner")
                 }
             }
             return
@@ -477,6 +618,12 @@ internal class TogetherCall(private val context: Context, private val session: T
             override fun onRenegotiationNeeded() {}
             override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
                 val track = receiver.track()
+                if (track is AudioTrack) main.post {
+                    if (run == peerGeneration && !closed) {
+                        remoteAudio = track
+                        track.setEnabled(!mutable.value.remoteMuted)
+                    }
+                }
                 if (track is VideoTrack) main.post { if (run == peerGeneration && !closed) mutable.value = mutable.value.copy(remoteVideo = track) }
             }
         }) ?: error("Unable to create call connection")
@@ -493,18 +640,24 @@ internal class TogetherCall(private val context: Context, private val session: T
         val sender = videoSender ?: return
         val params = sender.parameters
         val sharing = screenTrack != null
-        params.degradationPreference = if (sharing) RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
-            else RtpParameters.DegradationPreference.BALANCED
+        val mode = mutable.value.qualityMode
+        val profile = videoQuality.profile
+        params.degradationPreference = if (sharing || mode != CallQualityMode.AUTOMATIC)
+            RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION else RtpParameters.DegradationPreference.BALANCED
         params.encodings.forEach {
-            it.maxBitrateBps = if (sharing) 2_500_000 else if (captureHeight > 720) 4_000_000 else 2_500_000
-            it.maxFramerate = if (sharing) 15 else profile.fps
-            it.scaleResolutionDownBy = if (sharing) 1.0 else (captureHeight.toDouble() / profile.height).coerceAtLeast(1.0)
+            it.active = sharing || profile.height > 0
+            it.maxBitrateBps = if (sharing) 2_500_000 else mode.bitrateCap
+            it.maxFramerate = if (sharing) 15 else profile.fps.coerceAtLeast(1)
+            it.scaleResolutionDownBy = if (sharing || profile.height == 0) 1.0
+                else (captureHeight.toDouble() / profile.height).coerceAtLeast(1.0)
         }
-        if (!sender.setParameters(params)) android.util.Log.w("TogetherCall", "Unable to apply video sender limits")
+        val accepted = sender.setParameters(params)
+        if (!accepted) android.util.Log.w("TogetherCall", "Could not apply outgoing video settings")
+        appliedProfile = profile.takeIf { accepted && !sharing }
     }
 
     internal fun diagnostics(callback: (String) -> Unit) {
-        lastDiagnostics?.let(callback)
+        diagnosticsState.value?.let(callback)
     }
 
     private fun mediaConnected(): Boolean = peer?.let {
@@ -512,12 +665,21 @@ internal class TogetherCall(private val context: Context, private val session: T
             it.iceConnectionState() in setOf(PeerConnection.IceConnectionState.CONNECTED, PeerConnection.IceConnectionState.COMPLETED)
     } == true
 
+    private var firstMediaWallTime = 0L
+    private var firstMediaTick = 0L
+
     private fun connected() {
         if (negotiating || recovering && offerer && peer?.signalingState() != PeerConnection.SignalingState.STABLE) return
+        if (mutable.value.connectedAtMs == 0L && firstMediaWallTime == 0L) {
+            firstMediaWallTime = System.currentTimeMillis()
+            firstMediaTick = android.os.SystemClock.elapsedRealtime()
+            session.state.value.pairedCallId?.let { id ->
+                (context.applicationContext as? SaoreoApp)?.pairing?.callMedia(id, firstMediaWallTime, 0L, false)
+            }
+        }
         wasConnected = true
         recovering = false
         recoveryAttempts = 0
-        recoveryStarted = 0L
         main.removeCallbacks(recover)
         mutable.value = mutable.value.copy(connection = "Connected", retryAvailable = false,
             connectedAtMs = mutable.value.connectedAtMs.takeIf { it > 0 } ?: android.os.SystemClock.elapsedRealtime())
@@ -526,19 +688,17 @@ internal class TogetherCall(private val context: Context, private val session: T
     fun retryConnection() {
         if (!mutable.value.active || peer == null) return
         recoveryAttempts = 0
-        recoveryStarted = 0L
         recovering = false
         mutable.value = mutable.value.copy(retryAvailable = false)
         scheduleRecovery(0)
     }
 
     private fun scheduleRecovery(delayMs: Long = 2500) {
-        if (peer == null || mutable.value.retryAvailable) return
+        if (!mutable.value.active || closed || peer == null) return
         val starting = !recovering
-        if (starting) recoveryStarted = android.os.SystemClock.elapsedRealtime()
         recovering = true
-        mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
-        if (!main.hasCallbacks(recover) || starting) {
+        mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false, mediaWarning = null)
+        if (!main.hasCallbacks(recover) || starting || delayMs == 0L) {
             main.removeCallbacks(recover)
             main.postDelayed(recover, delayMs)
         }
@@ -546,24 +706,35 @@ internal class TogetherCall(private val context: Context, private val session: T
 
     private fun recoveryStep() {
         val pc = peer ?: return
-        if (mediaConnected() && !recovering) { connected(); return }
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (recoveryStarted == 0L) recoveryStarted = now
-        if (recoveryAttempts >= recoveryBackoff.size || now - recoveryStarted >= 75_000) {
-            recovering = false
-            mutable.value = mutable.value.copy(connection = "Connection unavailable", retryAvailable = true)
-            return
+        val signalingReady = session.state.value.connected && signalingOnline && connectivity.activeNetwork != null
+        when (CallRecoveryPolicy.action(mutable.value.active && !closed, mediaConnected() && !recovering, signalingReady)) {
+            CallRecoveryAction.STOP -> return
+            CallRecoveryAction.CONNECTED -> { connected(); return }
+            CallRecoveryAction.WAIT -> {
+                recovering = true
+                mutable.value = mutable.value.copy(connection = "Waiting for connection", mediaWarning = null)
+                main.postDelayed(recover, 2000)
+                return
+            }
+            CallRecoveryAction.RESTART -> Unit
         }
         recovering = true
-        mutable.value = mutable.value.copy(connection = "Reconnecting…", retryAvailable = false)
-        if (!session.state.value.connected || !signalingOnline) {
-            main.postDelayed(recover, 2000)
-            return
-        }
-        val delayMs = recoveryBackoff[recoveryAttempts++]
+        mutable.value = mutable.value.copy(connection = "Reconnecting…", mediaWarning = null,
+            retryAvailable = recoveryAttempts >= CallRecoveryPolicy.lastBackoffIndex)
+        val delayMs = CallRecoveryPolicy.delay(recoveryAttempts++)
         if (offerer) {
-            if (pc.signalingState() == PeerConnection.SignalingState.STABLE && !negotiating) createOffer(restart = true)
-            else resendDescription()
+            when {
+                pc.signalingState() == PeerConnection.SignalingState.STABLE && !negotiating -> createOffer(restart = true)
+                pc.signalingState() == PeerConnection.SignalingState.HAVE_LOCAL_OFFER &&
+                    recoveryAttempts % 5 == 0 -> {
+                    negotiating = true
+                    pc.setLocalDescription(sdpObserver(onSet = {
+                        negotiating = false
+                        createOffer(restart = true)
+                    }), SessionDescription(SessionDescription.Type.ROLLBACK, ""))
+                }
+                else -> resendDescription()
+            }
         } else {
             sendAuthenticated(JSONObject().put("type", "restartRequest"))
             resendDescription()
@@ -627,8 +798,7 @@ internal class TogetherCall(private val context: Context, private val session: T
             "background" -> mutable.value = mutable.value.copy(remoteBackground = payload.optBoolean("enabled"))
             "hangup" -> partnerEnded()
             "restartRequest" -> {
-                if (offerer && mutable.value.retryAvailable) retryConnection()
-                else if (offerer && !recovering) scheduleRecovery(0)
+                if (offerer && !recovering) scheduleRecovery(0)
                 else if (offerer) resendDescription()
             }
             "offer", "answer" -> {
@@ -740,9 +910,12 @@ internal class TogetherCall(private val context: Context, private val session: T
         peerGeneration++; peer?.close(); peer?.dispose(); peer = null; remoteId = null
         negotiationId = null; negotiating = false; hasRemoteDescription = false
         remoteSdp = null; localSdp = null; remoteCandidates.clear(); localCandidates.clear()
-        signalingOnline = false; recovering = false; wasConnected = false; recoveryAttempts = 0; recoveryStarted = 0L
-        statsSampler = CallStatsSampler(); lastDiagnostics = null
-        mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false, retryAvailable = false, connectedAtMs = 0L)
+        signalingOnline = false; recovering = false; wasConnected = false; recoveryAttempts = 0
+        statsSampler = CallStatsSampler()
+        diagnosticsState.value = null
+        appliedProfile = null
+        warningSamples = 0
+        mutable.value = mutable.value.copy(remoteVideo = null, remoteSharing = false, retryAvailable = false, connectedAtMs = 0L, mediaWarning = null)
     }
     private fun partnerEnded() {
         stopCall(notifyPartner = false)
@@ -752,6 +925,13 @@ internal class TogetherCall(private val context: Context, private val session: T
     fun stop() = stopCall(notifyPartner = true)
 
     private fun stopCall(notifyPartner: Boolean) {
+        if (mutable.value.active) session.state.value.pairedCallId?.let { id ->
+            val connected = firstMediaTick
+            val duration = if (connected > 0) (android.os.SystemClock.elapsedRealtime() - connected).coerceAtLeast(0L) else 0L
+            (context.applicationContext as? SaoreoApp)?.pairing?.callMedia(id, firstMediaWallTime, duration, true)
+        }
+        firstMediaWallTime = 0L
+        firstMediaTick = 0L
         main.removeCallbacks(networkChanged)
         if (monitoringNetwork) {
             connectivity.unregisterNetworkCallback(networkCallback)
@@ -760,6 +940,8 @@ internal class TogetherCall(private val context: Context, private val session: T
         checkedNetwork = null
         if (notifyPartner && mutable.value.active) sendAuthenticated(JSONObject().put("type", "hangup"))
         mutable.value = mutable.value.copy(active = false)
+        muteRemote(false)
+        remoteAudio = null
         torch(false)
         stopScreenShare()
         camera(false); audioTrack.setEnabled(false); resetAuthentication()
@@ -833,7 +1015,6 @@ internal class TogetherCall(private val context: Context, private val session: T
         factory.dispose(); adm.release(); egl.release()
     }
     companion object {
-        private val recoveryBackoff = longArrayOf(3500, 5500, 8000, 12000, 15000)
         private val secureFingerprint = Regex("(?mi)^a=fingerprint:sha-256 (?:[0-9a-f]{2}:){31}[0-9a-f]{2}\\r?$")
         fun outputName(device: AudioDeviceInfo): String = when (device.type) {
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"

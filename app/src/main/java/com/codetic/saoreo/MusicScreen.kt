@@ -381,9 +381,34 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
             catch (error: Exception) { reorder.discard(order); throw error }
         }
     }
+    val trackReorder = remember(musicListState, playlist?.id) { PlaylistReorder(musicListState) }
+    val savedTrackOrder = membership.filter { it.playlist == playlist?.id }.map { it.song }
+    LaunchedEffect(savedTrackOrder, trackReorder.dragging) { trackReorder.acceptSaved(savedTrackOrder) }
+    if (!full && playlist != null) PlaylistDragScroll(musicListState, trackReorder, reorderEdge)
     val playlistSongs = if (playlist == null) emptyList() else {
         val byId = songs.associateBy { it.id }
-        membership.filter { it.playlist == playlist.id }.mapNotNull { byId[it.song] }
+        val order = trackReorder.draft?.filter { it in savedTrackOrder }.orEmpty()
+        (order + savedTrackOrder).distinct().mapNotNull(byId::get)
+    }
+    val selection = remember(collection, section) { SongSelection() }
+    SongDeletionDialog(app, selection)
+    fun saveTrackOrder(order: List<String>) {
+        val playlistId = playlist?.id ?: return
+        perform {
+            try { app.collections.reorderTracks(playlistId, order) }
+            catch (error: Exception) { trackReorder.discard(order); throw error }
+            if (player != null) {
+                val previous = savedTrackOrder.mapNotNull { id -> songs.firstOrNull { it.id == id }?.galleryUri }
+                val queue = List(player.mediaItemCount) { player.getMediaItemAt(it).mediaId }
+                if (queue == previous) {
+                    val rows = songs.associateBy { it.id }
+                    order.mapNotNull { rows[it]?.galleryUri }.forEachIndexed { index, uri ->
+                        val from = (index until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == uri }
+                        if (from != null && from != index) player.moveMediaItem(from, index)
+                    }
+                }
+            }
+        }
     }
     var playlistOptions by remember(playlist?.id) { mutableStateOf(false) }
     val matching = songs.filter { song ->
@@ -397,7 +422,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
         section == "Recent" -> matching.filter { (stateBySong[it.id]?.played ?: 0) > 0 }.sortedByDescending { stateBySong[it.id]?.played }
         section == "Most played" -> matching.filter { (stateBySong[it.id]?.playCount ?: 0) > 0 }.sortedByDescending { stateBySong[it.id]?.playCount }
         else -> matching
-    }.let { rows -> if (section in listOf("Recent", "Most played")) rows else when (sort) {
+    }.let { rows -> if (playlist != null || section in listOf("Recent", "Most played")) rows else when (sort) {
         "Title" -> rows.sortedBy { (tags[it.galleryUri]?.title ?: it.title).lowercase() }
         "Artist" -> rows.sortedBy { tags[it.galleryUri]?.artist.orEmpty().lowercase() }
         "Duration" -> rows.sortedByDescending { tags[it.galleryUri]?.duration ?: it.duration }
@@ -413,7 +438,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
     val trackSubtitle = current?.let { tags[it.galleryUri]?.artist }
         ?: player?.mediaMetadata?.artist?.toString() ?: "Unknown artist"
 
-    BackHandler(full || collection != null) {
+    BackHandler(selection.ids.isEmpty() && (full || collection != null)) {
         if (full) full = false else collection = null
     }
     val showPlaylistCover = playlist != null && !full
@@ -448,7 +473,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (!full) IconButton({ searching = !searching; if (!searching) query = "" }) { Icon(painterResource(R.drawable.ic_ui_search), "Search music") }
-            if (!full) ChoiceMenu(sort, listOf("Date added", "Title", "Duration", "Artist"), { it }) { sort = it }
+            if (!full && playlist == null) ChoiceMenu(sort, listOf("Date added", "Title", "Duration", "Artist"), { it }) { sort = it }
             if (!full && playlist == null) IconButton({ import.launch(arrayOf("audio/*")) }, enabled = !importing) {
                 Icon(Icons.Outlined.Add, "Import audio")
             }
@@ -495,6 +520,7 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                             selectedLabelColor = Ink))
                 }
             }
+            if (selection.ids.isNotEmpty()) SongSelectionBar(selection)
             LazyColumn(Modifier.weight(1f), state = musicListState, contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
@@ -563,7 +589,9 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                                     Text(playlist.name, style = MaterialTheme.typography.headlineMedium,
                                         color = Color.White, fontWeight = FontWeight.SemiBold,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    Text("${playlistSongs.size} ${if (playlistSongs.size == 1) "track" else "tracks"}",
+                                    Text(playlistSummary(playlistSongs.size, playlistSongs.sumOf {
+                                        tags[it.galleryUri]?.duration?.takeIf { duration -> duration > 0 } ?: it.duration
+                                    }),
                                         color = Color(0xFFE0DDE6), style = MaterialTheme.typography.labelMedium)
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -603,8 +631,12 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                                 supportingContent = { Text(listOfNotNull(metadata?.artist ?: song.artist ?: "Unknown artist",
                                     metadata?.duration?.takeIf { playlist == null && it > 0 }?.let(::playbackTime)).joinToString(" · "),
                                     maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                modifier = Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = player != null) { play(visible, song) },
-                                colors = ListItemDefaults.colors(containerColor = if (currentUri == song.galleryUri)
+                                modifier = Modifier.then(trackReorder.modifier(song.id)).clip(RoundedCornerShape(18.dp))
+                                    .combinedClickable(onLongClick = { selection.toggle(song.id) }, onClick = {
+                                        if (selection.ids.isNotEmpty()) selection.toggle(song.id) else play(visible, song)
+                                    }),
+                                colors = ListItemDefaults.colors(containerColor = if (song.id in selection.ids)
+                                    MaterialTheme.colorScheme.secondaryContainer else if (currentUri == song.galleryUri)
                                     MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent),
                                 leadingContent = { Artwork(app, song.galleryUri, 40, true, shape = CircleShape, coverUrl = song.thumbnail) },
                                 trailingContent = {
@@ -614,6 +646,8 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                                             if (duration > 0) Text(playbackTime(duration), style = MaterialTheme.typography.labelMedium,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
+                                        if (playlist != null && query.isBlank() && selection.ids.isEmpty())
+                                            PlaylistDragHandle(trackReorder, song.id, savedTrackOrder, ::saveTrackOrder)
                                         IconButton({ songOptions = song }) { Icon(Icons.Outlined.MoreVert, "Track options") }
                                     }
                                 },
@@ -704,4 +738,16 @@ internal fun MusicLibrary(app: SaoreoApp, selected: String?, launchPlayer: Boole
                 }
             }, confirmButton = { TextButton({ songOptions = null }) { Text("Done") } })
     }
+}
+
+private fun playlistSummary(count: Int, duration: Long): String {
+    val minutes = duration / 60_000
+    val hours = minutes / 60
+    val remainder = minutes % 60
+    val time = when {
+        hours == 0L -> "$minutes min"
+        remainder == 0L -> "$hours hr"
+        else -> "$hours hr $remainder min"
+    }
+    return "$count ${if (count == 1) "song" else "songs"} • $time"
 }

@@ -57,6 +57,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Modifier,
                     search: Boolean = false, jobsOnly: Boolean = false, importAction: Int = 0, onActivity: ((Boolean) -> Unit)? = null, libraryVideos: Boolean = false, paste: () -> Unit = {}) {
@@ -98,6 +99,8 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
         }
     val failures = downloads.filter { it.state in setOf("FAILED", "CANCELLED") && matchesSearch(it) }
     val paused = downloads.filter { it.state == JobState.PAUSED.name && matchesSearch(it) }
+    val selection = remember(folder, jobsOnly, libraryVideos) { SongSelection() }
+    SongDeletionDialog(app, selection)
     val history = (if (jobsOnly) paused + failures else saved).let { rows -> when (sort) {
         "Title" -> rows.sortedBy { it.title.lowercase() }
         "Size" -> rows.sortedByDescending { it.bytes ?: 0 }
@@ -127,6 +130,9 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
     var editingLink by remember { mutableStateOf(false) }
     LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (selection.ids.isNotEmpty()) stickyHeader {
+            Surface { SongSelectionBar(selection) }
+        }
         item(key = "download-controls") {
             Column(Modifier.fillMaxWidth().animateContentSize()) {
                 if (!libraryVideos) LinkInput(app, settings, Modifier.fillMaxWidth().padding(bottom = 4.dp),
@@ -168,12 +174,16 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 IconButton({ addFolder = true }) { Icon(painterResource(R.drawable.ic_folder_new), "New folder") }
             }
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 folders.filter { it.parent == folder.orEmpty() }.forEach { child ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        AssistChip({ folder = child.id }, label = { Text(child.name, maxLines = 1) },
-                            leadingIcon = { Icon(Icons.Outlined.FolderOpen, null, Modifier.size(18.dp)) })
+                    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                      Row(Modifier.fillMaxWidth().heightIn(min = 72.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ListItem(modifier = Modifier.weight(1f).clickable { folder = child.id },
+                            headlineContent = { Text(child.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            supportingContent = { Text("${downloads.count { it.folder == child.id && it.state == JobState.COMPLETE.name }} items") },
+                            leadingContent = { Icon(Icons.Outlined.FolderOpen, null, Modifier.size(28.dp)) },
+                            colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent))
                         var menu by remember(child.id) { mutableStateOf(false) }
                         Box {
                             IconButton({ menu = true }) { Icon(Icons.Outlined.MoreVert, "Folder actions for ${child.name}") }
@@ -182,6 +192,7 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                                 DropdownMenuItem({ Text("Move") }, { menu = false; moveFolder = child })
                             }
                         }
+                      }
                     }
                 }
             }
@@ -214,7 +225,7 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                 val audio = mime.startsWith("audio/")
                 val canOpen = item.state == JobState.COMPLETE.name && uri != null && available
                 fun open() {
-                    if (video || audio || mime.startsWith("image/")) playSavedMedia(context, item)
+                    if (video || audio || mime.startsWith("image/")) playSavedMedia(context, item, history.filter { it.mime?.startsWith("video/") == true }.map { it.id })
                     else uri?.let { showMedia(context, it, mime, false) }
                 }
                 val transfer = transferProgress[item.id]
@@ -244,7 +255,9 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                         }.getOrNull()
                     }
                 }
-                Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                val selectable = audio && item.state == JobState.COMPLETE.name
+                Surface(shape = RoundedCornerShape(22.dp), color = if (item.id in selection.ids)
+                    MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer) {
                     Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             val isImage = item.mime?.startsWith("image/") == true
@@ -253,8 +266,12 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
                             } else item.thumbnail
                             Row(Modifier.weight(1f).combinedClickable(
                                 onClickLabel = if (!canOpen) "Download actions" else if (video || audio) "Play" else "Open",
-                                onClick = { if (canOpen) open() else menu = true },
-                                onLongClickLabel = "Download actions", onLongClick = { menu = true },
+                                onClick = {
+                                    if (selectable && selection.ids.isNotEmpty()) selection.toggle(item.id)
+                                    else if (canOpen) open() else menu = true
+                                },
+                                onLongClickLabel = if (selectable) "Select song" else "Download actions",
+                                onLongClick = { if (selectable) selection.toggle(item.id) else menu = true },
                             ), horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 if (audio) RecordArt(Modifier.size(58.dp), item.id.hashCode())
@@ -358,7 +375,10 @@ fun DownloadsScreen(app: SaoreoApp, settings: Settings, modifier: Modifier = Mod
     confirmation?.let { item ->
         AlertDialog(onDismissRequest = { confirmation = null },
             title = { Text("Delete this file?") }, text = { Text(item.title) },
-            confirmButton = { TextButton(onClick = { confirmation = null; act { app.downloads.remove(item, true) } }) { Text("Delete") } },
+            confirmButton = { TextButton(onClick = { confirmation = null; act {
+                if (item.mime?.startsWith("audio/") == true) app.downloads.deleteSong(item.id)
+                else app.downloads.remove(item, true)
+            } }) { Text("Delete") } },
             dismissButton = { TextButton(onClick = { confirmation = null }) { Text("Cancel") } })
     }
 }

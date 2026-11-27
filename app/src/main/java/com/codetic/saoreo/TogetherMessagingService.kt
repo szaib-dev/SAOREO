@@ -16,6 +16,10 @@ class TogetherMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        if (message.data["type"] == "chat_wake") {
+            scheduleChatSync(applicationContext, expedite = message.priority == RemoteMessage.PRIORITY_HIGH)
+            return
+        }
         if (message.data["type"] != "call_wake") return
         val id = message.data["ring"]?.takeIf { it.matches(Regex("[a-f0-9]{16}")) } ?: return
         val pairing = (application as SaoreoApp).pairing
@@ -35,6 +39,14 @@ class TogetherMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
+        internal fun scheduleChatSync(context: android.content.Context, expedite: Boolean = false) {
+            WorkManager.getInstance(context).enqueueUniqueWork("paired-chat-wake", ExistingWorkPolicy.APPEND_OR_REPLACE,
+                OneTimeWorkRequestBuilder<PairedChatWakeWorker>()
+                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                    .apply { if (expedite) setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST) }
+                    .build())
+        }
+
         internal fun register(app: android.app.Application) {
             if (com.google.firebase.FirebaseApp.getApps(app).isEmpty()) return
             FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
@@ -68,5 +80,19 @@ class CallPushWakeWorker(context: android.content.Context, params: WorkerParamet
             Result.success()
         } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
         catch (_: Exception) { Result.failure() }
+    }
+}
+
+class PairedChatWakeWorker(context: android.content.Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val app = applicationContext as SaoreoApp
+        return try {
+            app.pairing.refreshMessages()
+            Result.success()
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: java.io.IOException) {
+            if (runAttemptCount < 5) Result.retry() else Result.failure()
+        }
     }
 }

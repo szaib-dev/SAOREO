@@ -37,7 +37,7 @@ internal data class TogetherState(val connected: Boolean = false, val connecting
     val chat: List<TogetherChat> = emptyList(), val reaction: TogetherReaction? = null,
     val incomingChat: TogetherChat? = null,
     val request: RoomRequest? = null, val answer: RoomAnswer? = null, val callFullscreen: Boolean = false,
-    val pairKind: PairKind? = null, val connectionSlow: Boolean? = null,
+    val pairKind: PairKind? = null, val pairedCallId: String? = null, val connectionSlow: Boolean? = null,
     val memberConnections: Map<String, Boolean> = emptyMap(), val autoAdvanceQueue: Boolean = false)
 
 internal val TogetherState.canStartPlayback: Boolean
@@ -157,13 +157,13 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         if (state.value.room == launch.ticket.getString("room") && endpoint == launch.server) return
         enterRequest?.cancel()
         if (state.value.room.isNotEmpty()) leave()
-        attach(launch.server, launch.ticket, launch.kind)
+        attach(launch.server, launch.ticket, launch.kind, launch.id.takeUnless { launch.kind == PairKind.WATCH })
     }
 
     fun watchRoomFor(server: String?): JSONObject? = state.value.takeIf { it.connected && it.room.isNotEmpty() && endpoint == server }
         ?.let { JSONObject().put("room", it.room).put("roomToken", token) }
 
-    private fun attach(base: String, ticket: JSONObject, kind: PairKind?) {
+    private fun attach(base: String, ticket: JSONObject, kind: PairKind?, callId: String? = null) {
         latencyAverage = null
         endpoint = base
         token = ticket.getString("token")
@@ -173,7 +173,7 @@ internal class TogetherSession(application: Application) : AndroidViewModel(appl
         bestRtt = Long.MAX_VALUE
         leaving = false
         mutable.value = TogetherState(connecting = true, room = ticket.getString("room"),
-            member = ticket.getString("member"), invite = ticket.getString("invite"), pairKind = kind)
+            member = ticket.getString("member"), invite = ticket.getString("invite"), pairKind = kind, pairedCallId = callId)
         connect()
     }
 

@@ -5,7 +5,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Person
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -98,8 +97,9 @@ class TogetherAvailabilityService : Service() {
         val answer = openTogether(4, ring.id)
         val builder = Notification.Builder(this, if (quiet) SILENT_RING else RING)
             .setSmallIcon(R.drawable.ic_call_incoming_notification)
-            .setContentTitle(ring.kind.title)
-            .setContentText(partner)
+            .setColor(TOGETHER_NOTIFY_LIME)
+            .setContentTitle(if (ring.kind == PairKind.WATCH) ring.kind.title else partner)
+            .setContentText(if (ring.kind == PairKind.WATCH) partner else "Incoming ${ring.kind.title.lowercase()}")
             .setCategory(if (ring.kind == PairKind.WATCH) Notification.CATEGORY_EVENT else Notification.CATEGORY_CALL)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentIntent(openTogether(5, showRing = ring.kind != PairKind.WATCH))
@@ -109,7 +109,9 @@ class TogetherAvailabilityService : Service() {
             builder.addAction(Notification.Action.Builder(null, "Decline", decline).build())
                 .addAction(Notification.Action.Builder(null, "Accept", answer).build())
         } else {
-            builder.setStyle(Notification.CallStyle.forIncomingCall(Person.Builder().setName(partner).setImportant(true).build(), decline, answer))
+            builder.setStyle(Notification.CallStyle.forIncomingCall(PairedChatNotifications.partner(this, partner), decline, answer)
+                .setIsVideo(ring.kind == PairKind.VIDEO).setAnswerButtonColorHint(TOGETHER_NOTIFY_LIME)
+                .setDeclineButtonColorHint(0xffff4f51.toInt()))
             if (!quiet && (Build.VERSION.SDK_INT < 34 || notifications.canUseFullScreenIntent())) {
                 builder.setFullScreenIntent(openTogether(6, showRing = true), true)
             }
@@ -118,6 +120,9 @@ class TogetherAvailabilityService : Service() {
         else {
             promote(RING_ID, builder.build())
             notifications.cancel(AVAILABLE_ID)
+        }
+        if (notifications.activeNotifications.any { it.id == RING_ID }) {
+            pairing.acknowledgeIncomingAlert(ring.id)
         }
     }
 

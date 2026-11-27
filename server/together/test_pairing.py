@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import secrets
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
@@ -79,6 +81,199 @@ class PairingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(200, (await self.post('unpair', self.b))[0])
         self.assertIsNone((await self.event(a, 'pairState', lambda s: s['partner'] is None))['partner'])
         self.assertEqual(404, (await self.post('accept', self.b, code=code, name='Sam'))[0])
+
+    async def test_chat_queue_survives_restart_with_idempotent_delivery_and_read_ack(self):
+        await self.pair()
+        _, state = await self.post('state', self.a)
+        room = state['conversation']
+        message = secrets.token_hex(16)
+        # Opaque JWE-shaped fixture. The server has no decryption key.
+        envelope = 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..AAAAAAAAAAAAAAAA.AAAA.AAAAAAAAAAAAAAAAAAAAAA'
+        args = dict(conversation=room, id=message, envelope=envelope)
+        self.assertEqual(403, (await self.post('chat-send', self.stranger, **args))[0])
+        self.assertEqual(409, (await self.post('chat-send', self.a, **(args | {'conversation': 'not-my-pair'})))[0])
+        self.assertEqual(400, (await self.post('chat-send', self.a, **(args | {'envelope': 'hello'})))[0])
+        status, queued = await self.post('chat-send', self.a, **args)
+        self.assertEqual(200, status)
+        self.assertIsNone(queued['delivered'])
+        self.assertEqual((200, queued), await self.post('chat-send', self.a, **args))
+        await self.client.close()
+        await self.start_server()
+        _, state = await self.post('state', self.b)
+        self.assertEqual(room, state['conversation'])
+        _, sync = await self.post('chat-sync', self.b, conversation=room)
+        self.assertEqual([(message, envelope)], [(m['id'], m['envelope']) for m in sync['inbox']])
+        _, premature = await self.post('chat-sync', self.b, conversation=room, read=[message])
+        self.assertEqual(1, len(premature['inbox']))
+        _, sync = await self.post('chat-sync', self.b, conversation=room, delivered=[message])
+        self.assertEqual([], sync['inbox'])
+        _, status = await self.post('chat-sync', self.a, conversation=room, status=[message])
+        self.assertIsNotNone(status['status'][0]['delivered'])
+        self.assertIsNone(status['status'][0]['read'])
+        await self.post('chat-sync', self.b, conversation=room, read=[message])
+        _, status = await self.post('chat-sync', self.a, conversation=room, status=[message])
+        self.assertIsNotNone(status['status'][0]['read'])
+        self.assertEqual(200, (await self.post('chat-send', self.a, **args))[0])
+        _, sync = await self.post('chat-sync', self.b, conversation=room)
+        self.assertEqual([], sync['inbox'])
+        self.assertIsNone(self.service.pairing.db.execute('SELECT envelope FROM chat_delivery').fetchone()[0])
+        await self.post('unpair', self.a)
+        self.assertEqual(403, (await self.post('chat-sync', self.a, conversation=room))[0])
+
+    async def test_rejected_ciphertext_does_not_block_inbox_and_can_be_retried(self):
+        await self.pair()
+        _, state = await self.post('state', self.a)
+        conversation = state['conversation']
+        message = secrets.token_hex(16)
+        envelope = 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..AAAAAAAAAAAAAAAA.AAAA.AAAAAAAAAAAAAAAAAAAAAA'
+        args = dict(conversation=conversation, id=message, envelope=envelope)
+        self.assertEqual(409, (await self.post('chat-send', self.a, **args, attachment=True))[0])
+        self.assertEqual(200, (await self.post('chat-send', self.a, **args))[0])
+        _, inbox = await self.post('chat-sync', self.b, conversation=conversation, rejected=[message])
+        self.assertEqual([], inbox['inbox'])
+        _, status = await self.post('chat-sync', self.a, conversation=conversation, status=[message])
+        self.assertIsNotNone(status['status'][0]['rejected'])
+        self.assertIsNone(status['status'][0]['delivered'])
+        self.assertEqual(200, (await self.post('chat-send', self.a, **args))[0])
+        _, inbox = await self.post('chat-sync', self.b, conversation=conversation)
+        self.assertEqual(message, inbox['inbox'][0]['id'])
+
+    async def test_socket_chat_and_receipts_without_polling(self):
+        await self.pair()
+        a, b = await self.socket(self.a), await self.socket(self.b)
+        conversation = (await self.event(a, 'pairState'))['conversation']
+        self.assertTrue((await self.event(b, 'pairState'))['socketChat'])
+
+        async def request(ws, operation, sequence, **body):
+            request_id = str(sequence)
+            await ws.send_json(dict(type=operation, requestId=request_id, conversation=conversation, **body))
+            return (await self.event(ws, 'chatResponse', lambda event: event['requestId'] == request_id))['result']
+
+        await request(b, 'chat-sync', 1, pushInbox=True)
+        message = secrets.token_hex(16)
+        envelope = 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..AAAAAAAAAAAAAAAA.AAAA.AAAAAAAAAAAAAAAAAAAAAA'
+        sent = await request(a, 'chat-send', 1, id=message, envelope=envelope)
+        self.assertIsNone(sent['delivered'])
+        direct = (await self.event(b, 'chatMessage'))['message']
+        self.assertEqual((message, envelope, sent['queued']), (direct['id'], direct['envelope'], direct['queued']))
+        inbox = (await request(b, 'chat-sync', 2))['inbox']
+        self.assertEqual([message], [row['id'] for row in inbox])
+        await request(b, 'chat-sync', 3, read=[message])
+        await request(b, 'chat-sync', 4, delivered=[message])
+        receipt = (await self.event(a, 'chatReceipts'))['status'][0]
+        self.assertIsNotNone(receipt['delivered'])
+        self.assertIsNone(receipt['read'])
+        await request(b, 'chat-sync', 5, read=[message])
+        self.assertIsNotNone((await self.event(a, 'chatReceipts'))['status'][0]['read'])
+        self.assertEqual(sent['queued'], (await request(a, 'chat-send', 2, id=message, envelope=envelope))['queued'])
+        self.assertEqual([], (await request(b, 'chat-sync', 6))['inbox'])
+
+    async def test_two_offline_calls_keep_times_and_never_replay_ringing(self):
+        await self.pair()
+        sender = hashlib.sha256(self.a.encode()).hexdigest()
+        a = await self.socket(self.a)
+        expected = {}
+        for kind in ('audio', 'video'):
+            await a.send_json(dict(type='ring', kind=kind))
+            state = await self.event(a, 'pairState', lambda event: event.get('ring') is not None)
+            self.assertFalse(state['ring']['delivered'])
+            ring = self.service.pairing.rings[sender]
+            expected[ring.id] = ring.expires - 30_000
+            with patch('pairing.timestamp', return_value=ring.expires + 1):
+                await self.service.pairing.resolve(ring, 'missed')
+            self.assertEqual('unavailable', (await self.event(a, 'ringResult'))['outcome'])
+        await a.close()
+        await self.client.close()
+        await self.start_server()
+        b = await self.socket(self.b)
+        state = await self.event(b, 'pairState')
+        self.assertIsNone(state['ring'])
+        _, first = await self.post('chat-sync', self.b, conversation=state['conversation'], callCursor='0:')
+        self.assertEqual(expected, {call['id']: call['started'] for call in first['calls']})
+        self.assertTrue(all(call['incoming'] and call['outcome'] == 'missed' for call in first['calls']))
+        _, next_page = await self.post('chat-sync', self.b, conversation=state['conversation'], callCursor=first['callCursor'])
+        self.assertEqual([], next_page['calls'])
+
+    async def test_interrupted_ring_never_rings_after_restart_and_is_recorded(self):
+        await self.pair()
+        a = await self.socket(self.a)
+        await a.send_json(dict(type='ring', kind='video'))
+        pending = await self.event(a, 'pairState', lambda state: state['ring'] is not None)
+        self.assertFalse(pending['ring']['delivered'])
+        await a.close()
+        await self.client.close()
+        await self.start_server()
+        for token, outcome, incoming in [(self.a, 'unavailable', False), (self.b, 'missed', True)]:
+            _, state = await self.post('state', token)
+            self.assertIsNone(state['ring'])
+            _, sync = await self.post('chat-sync', token, conversation=state['conversation'])
+            history = sync['calls']
+            self.assertEqual(1, len(history))
+            self.assertEqual(pending['ring']['id'], history[0]['id'])
+            self.assertEqual(outcome, history[0]['outcome'])
+            self.assertEqual(incoming, history[0]['incoming'])
+
+    async def test_encrypted_attachment_authentication_restart_cleanup_and_expiry(self):
+        await self.pair()
+        _, state = await self.post('state', self.a)
+        conversation = state['conversation']
+        envelope = 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..AAAAAAAAAAAAAAAA.AAAA.AAAAAAAAAAAAAAAAAAAAAA'
+        # A realistic-size ciphertext body verifies the route can exceed the JSON endpoint limit.
+        envelope = envelope.replace('.AAAA.', '.' + 'A' * 87000 + '.')
+
+        async def part(method, token, attachment, index=0, transfer=None, room=conversation, total=2):
+            path = f'/together/api/pair/attachment/{room}/{attachment}/{index}'
+            async with self.client.request(method, path, data=transfer,
+                    headers=self.auth(token) | {'X-Part-Count': str(total)}) as response:
+                return response.status, await response.text(), response.headers.get('X-Parts-Stored')
+
+        item = secrets.token_hex(16)
+        self.assertEqual(400, (await part('PUT', self.a, item, transfer='plaintext'))[0])
+        self.assertEqual(409, (await part('PUT', self.a, item, 1, envelope))[0])
+        self.assertEqual(200, (await part('PUT', self.a, item, transfer=envelope))[0])
+        self.assertEqual(200, (await part('PUT', self.a, item, transfer=envelope))[0])
+        self.assertEqual(409, (await part('PUT', self.a, item, transfer=envelope.replace('.AAAA', '.BAAA', 1)))[0])
+        self.assertEqual(403, (await part('GET', self.stranger, item))[0])
+        self.assertEqual(401, (await part('GET', 'invalid', item))[0])
+        self.assertEqual(403, (await part('GET', self.b, item, room=secrets.token_hex(16)))[0])
+        self.assertEqual(410, (await part('GET', self.a, item))[0])
+        self.assertEqual(409, (await part('DELETE', self.b, item))[0])
+        await self.client.close()
+        await self.start_server()
+        self.assertEqual('1', (await part('HEAD', self.a, item))[2])
+        self.assertEqual('0', (await part('HEAD', self.b, item))[2])
+        self.assertEqual(200, (await part('PUT', self.a, item, 1, envelope))[0])
+        self.assertEqual((200, envelope, None), await part('GET', self.b, item, 1))
+        self.assertEqual(200, (await part('DELETE', self.b, item))[0])
+        self.assertEqual('2', (await part('HEAD', self.a, item))[2])
+        self.assertEqual(410, (await part('GET', self.b, item))[0])
+        self.assertEqual(0, self.service.pairing.db.execute('SELECT count(*) FROM chat_attachment_part').fetchone()[0])
+
+        expired = secrets.token_hex(16)
+        self.assertEqual(200, (await part('PUT', self.a, expired, transfer=envelope))[0])
+        with self.service.pairing.db:
+            self.service.pairing.db.execute('UPDATE chat_attachment SET expires=0 WHERE id=?', (expired,))
+        self.assertEqual(410, (await part('GET', self.b, expired))[0])
+        self.assertEqual('0', (await part('HEAD', self.a, expired))[2])
+        self.assertEqual(200, (await self.post('unpair', self.a))[0])
+        self.assertEqual(403, (await part('GET', self.b, item))[0])
+
+    async def test_expired_call_cannot_be_acknowledged_or_accepted(self):
+        await self.pair()
+        a = await self.socket(self.a)
+        await self.event(a, 'pairState')
+        await a.send_json(dict(type='ring', kind='video'))
+        state = await self.event(a, 'pairState', lambda value: value['ring'] is not None)
+        ring_id = state['ring']['id']
+        self.assertFalse(state['ring']['delivered'])
+        with patch('pairing.timestamp', return_value=self.service.pairing.rings[hashlib.sha256(self.a.encode()).hexdigest()].expires + 1):
+            _, refreshed = await self.post('state', self.b)
+            self.assertIsNone(refreshed['ring'])
+            self.assertEqual(200, (await self.post('received', self.b, id=ring_id))[0])
+            self.assertEqual(409, (await self.post('answer', self.b, id=ring_id, accepted=True))[0])
+        self.assertNotIn(ring_id, self.service.pairing.received)
+        self.assertEqual({}, self.service.rooms)
+        await a.close()
 
     async def test_request_waits_for_partner_reconnection(self):
         await self.pair()

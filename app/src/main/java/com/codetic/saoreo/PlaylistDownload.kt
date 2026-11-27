@@ -129,8 +129,8 @@ internal fun PlaylistDownloadDialog(app: SaoreoApp, settings: Settings, link: Me
                             app.downloads.enqueue(media, settings.copy(quality = if (audio) Quality.AUDIO else quality),
                                 Preview(item.title, item.thumbnail, item.duration, emptyList()), null,
                                 DownloadOptions(folder.takeIf { settings.folderOrganization }, destinationPlaylist.takeIf { audio }, bitrate = bitrate,
-                                    musicTitle = item.title.takeIf { spotifyUrl != null },
-                                    artist = item.artist.takeIf { spotifyUrl != null }, album = name.takeIf { audio },
+                                    musicTitle = item.musicTitle.takeIf { audio },
+                                    artist = item.musicArtist.takeIf { audio }, album = name.takeIf { audio },
                                     playlistPosition = (orderStart + item.key).takeIf { audio && destinationPlaylist != null }))
                             selected = selected - item.key
                             queued++

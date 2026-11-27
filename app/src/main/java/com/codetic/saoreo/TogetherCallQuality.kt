@@ -3,102 +3,153 @@ package com.codetic.saoreo
 import org.webrtc.RTCStats
 import org.webrtc.RTCStatsReport
 
-internal data class CallVideoProfile(val height: Int, val fps: Int) {
-    companion object {
-        val levels = listOf(CallVideoProfile(240, 12), CallVideoProfile(360, 18),
-            CallVideoProfile(540, 24), CallVideoProfile(720, 30), CallVideoProfile(1080, 30))
-    }
+internal enum class CallQualityMode(val label: String, val maxHeight: Int, val bitrateCap: Int) {
+    AUTOMATIC("Automatic", 1080, 5_000_000),
+    SMART("Smart Clarity (recommended)", 1080, 5_000_000),
+    SD("480p", 480, 1_800_000),
+    HD("720p HD", 720, 3_500_000),
+    FHD("1080p Full HD", 1080, 5_000_000),
+    MAXIMUM("1440p QHD · Maximum Clarity", 1440, 8_000_000),
 }
 
-/** Keeps libwebrtc in charge of congestion control and adjusts the camera's encoding envelope. */
-internal class CallVideoQuality {
-    private var level = 3
-    private var stableSamples = 0
-    private var stressedSamples = 0
+internal data class CallVideoProfile(val height: Int, val fps: Int) {
+    val label get() = if (height == 0) "Audio priority · video paused" else "${height}p · up to $fps fps"
+}
 
-    fun update(stats: CallNetworkStats, fullHd: Boolean): CallVideoProfile {
+/** An outgoing-only envelope. WebRTC still chooses the actual encoder bitrate below the cap. */
+internal class CallVideoQuality(private val mode: CallQualityMode, maxCaptureHeight: Int) {
+    private val tiers = listOf(
+        CallVideoProfile(0, 0), CallVideoProfile(360, 8), CallVideoProfile(480, 12),
+        CallVideoProfile(720, 18), CallVideoProfile(1080, 15),
+        CallVideoProfile(1080, 24), CallVideoProfile(1080, 30), CallVideoProfile(1440, 24),
+    )
+    private val bandwidth = listOf(0, 180_000, 400_000, 850_000, 1_650_000, 2_800_000, 4_000_000, 5_800_000)
+    private val ceiling = tiers.indexOfLast { it.height <= minOf(mode.maxHeight, maxCaptureHeight) }.coerceAtLeast(1)
+    private var level = if (mode == CallQualityMode.AUTOMATIC) ceiling else minOf(3, ceiling)
+    private var good = 0
+    private var bad = 0
+    private var unknown = 0
+    val profile get() = tiers[level]
+
+    fun update(stats: CallNetworkStats): CallVideoProfile {
+        if (mode == CallQualityMode.AUTOMATIC) return profile
         val estimate = stats.availableVideoBps
-        val limit = when {
-            estimate == null -> 3
-            estimate < 320_000 -> 0
-            estimate < 650_000 -> 1
-            estimate < 1_200_000 -> 2
-            estimate < 3_400_000 || !fullHd || stats.viaTcp -> 3
-            else -> 4
+        // Probe with low-rate video if pausing caused the transport estimate to disappear.
+        if (estimate == null && level == 0) {
+            if (++unknown >= 5) { level = 1; unknown = 0 }
+            return profile
         }
-        val stressed = (stats.loss ?: 0.0) >= 0.06 ||
-            ((stats.rttMs ?: 0.0) > 450 && (stats.jitterMs ?: 0.0) > 45) || stats.encoderLimited
-        val target = if (stressed) minOf(limit, (level - 1).coerceAtLeast(0)) else limit
-        if (target < level) {
-            stableSamples = 0
-            if (++stressedSamples >= 2) {
-                level = target
-                stressedSamples = 0
-            }
-        } else {
-            stressedSamples = 0
-            // Frame pacing can inflate RTP jitter even on a healthy low-RTT path.
-            val clear = estimate != null && (stats.loss ?: 0.0) < 0.025 &&
-                (stats.rttMs ?: 0.0) < 320 && !stats.encoderLimited
-            if (target > level && clear) {
-                if (++stableSamples >= if (level == 3) 10 else 4) {
-                    level++
-                    stableSamples = 0
+        unknown = 0
+        val currentLoss = if (level == 0) 0.0 else stats.loss ?: 0.0
+        val stressed = level > 0 && (stats.encoderLimited || currentLoss >= .08)
+        val floor = if (estimate != null && estimate < bandwidth[1]) 0 else 1
+        val target = when {
+            estimate == null -> level
+            estimate < bandwidth[level] -> bandwidth.indexOfLast { estimate >= it }.coerceAtMost(ceiling)
+            else -> bandwidth.indexOfLast { estimate >= it * 1.18 }.coerceIn(level, ceiling)
+        }
+        val desired = if (stressed) minOf(target, (level - 1).coerceAtLeast(floor)) else target
+        when {
+            desired < level -> {
+                good = 0
+                if (++bad >= 2) {
+                    // Reduce pacing first at Full HD, except when audio needs the link immediately.
+                    level = if (desired > 0 && level > 4 && !stats.encoderLimited) level - 1 else desired
+                    bad = 0
                 }
-            } else stableSamples = 0
+            }
+            desired > level && !stressed && estimate != null && currentLoss < .03 -> {
+                bad = 0
+                if (++good >= 4) { level++; good = 0 }
+            }
+            else -> { good = 0; bad = 0 }
         }
-        return CallVideoProfile.levels[level]
+        return profile
     }
 }
 
 internal data class CallNetworkStats(
     val rttMs: Double?, val loss: Double?, val jitterMs: Double?, val availableVideoBps: Double?,
-    val encoderLimited: Boolean, val viaTcp: Boolean, val diagnostic: String,
+    val encoderLimited: Boolean, val limitation: String?, val diagnostic: String,
 )
 
 private fun RTCStats.value(key: String) = (members[key] as? Number)?.toDouble()
 private fun RTCStats.video() = (members["kind"] ?: members["mediaType"]) == "video"
+private fun Double?.metric(unit: String = "") =
+    this?.takeIf { it.isFinite() }?.let { "%.1f%s".format(java.util.Locale.US, it, unit) } ?: "Unavailable"
 
 internal class CallStatsSampler {
-    private var previousBytes: Double? = null
-    private var previousStamp = 0.0
-    private var previousOutboundId: String? = null
+    private data class Counters(val bytes: Double?, val frames: Double?, val timestampUs: Double)
+    private var previous = emptyMap<String, Counters>()
 
     fun read(report: RTCStatsReport): CallNetworkStats {
         val all = report.statsMap
-        val transport = all.values.firstOrNull { it.type == "transport" && it.members["selectedCandidatePairId"] != null }
+        // Repair streams may also report kind=video. Select the actual camera/screen RTP stream.
+        val video = all.values.filter { it.video() && it.type in setOf("inbound-rtp", "outbound-rtp") }
+        val outbound = video.filter { it.type == "outbound-rtp" }.maxByOrNull { it.value("framesEncoded") ?: -1.0 }
+        val inbound = video.filter { it.type == "inbound-rtp" }.maxByOrNull { it.value("framesDecoded") ?: -1.0 }
+        val transport = all[(outbound ?: inbound)?.members?.get("transportId") as? String]
+            ?: all.values.firstOrNull { it.type == "transport" && it.members["selectedCandidatePairId"] != null }
         val pair = all[transport?.members?.get("selectedCandidatePairId") as? String]
         val local = all[pair?.members?.get("localCandidateId") as? String]
-        val relay = local?.members?.get("candidateType") == "relay"
-        val protocol = if (relay) local?.members?.get("relayProtocol") ?: local?.members?.get("protocol") else local?.members?.get("protocol")
-        val outbound = all.values.firstOrNull { it.type == "outbound-rtp" && it.video() }
+        val remote = all[pair?.members?.get("remoteCandidateId") as? String]
+        val relay = listOfNotNull(local, remote).filter { it.members["candidateType"] == "relay" }
+        val route = when {
+            relay.isNotEmpty() -> "TURN relay"
+            local != null && remote != null -> "Direct P2P"
+            else -> "Unavailable"
+        }
+        val protocol = relay.mapNotNull { (it.members["relayProtocol"] ?: it.members["protocol"]) as? String }
+            .distinct().joinToString(" / ").ifEmpty { local?.members?.get("protocol")?.toString() ?: "Unavailable" }
         val feedback = all[outbound?.members?.get("remoteId") as? String]
-            ?: all.values.firstOrNull { it.type == "remote-inbound-rtp" && it.video() }
-        val inbound = all.values.firstOrNull { it.type == "inbound-rtp" && it.video() }
-        val audio = all.values.firstOrNull { it.type == "inbound-rtp" && it.members["kind"] == "audio" }
+            ?: all.values.firstOrNull { it.type == "remote-inbound-rtp" && it.members["localId"] == outbound?.id && outbound != null }
         val available = pair?.value("availableOutgoingBitrate")?.takeIf { it > 0 }
         val rtt = (feedback?.value("roundTripTime") ?: pair?.value("currentRoundTripTime"))?.times(1000)
         val loss = feedback?.value("fractionLost")?.takeIf { it in 0.0..1.0 }
         val jitter = feedback?.value("jitter")?.times(1000)
-        val bytes = outbound?.value("bytesSent")
-        val elapsed = report.timestampUs - previousStamp
-        val actual = if (bytes != null && previousBytes != null && outbound.id == previousOutboundId && elapsed > 0)
-            ((bytes - previousBytes!!) * 8_000_000 / elapsed).coerceAtLeast(0.0).toLong() else null
-        previousBytes = bytes
-        previousStamp = report.timestampUs
-        previousOutboundId = outbound?.id
-        val codec = all[outbound?.members?.get("codecId") as? String]?.members?.get("mimeType")
-        val summary = "route=${if (relay) "relay" else local?.members?.get("candidateType")}/$protocol " +
-            "rttMs=$rtt loss=$loss sendJitterMs=$jitter receiveJitterMs=${inbound?.value("jitter")?.times(1000)} " +
-            "availableBps=$available encoderBps=$actual codec=$codec encoder=${outbound?.members?.get("encoderImplementation")} " +
-            "limit=${outbound?.members?.get("qualityLimitationReason")} " +
-            "send=${outbound?.value("frameWidth")}x${outbound?.value("frameHeight")}@${outbound?.value("framesPerSecond")} " +
-            "receive=${inbound?.value("frameWidth")}x${inbound?.value("frameHeight")}@${inbound?.value("framesPerSecond")} " +
-            "encoded=${outbound?.value("framesEncoded")} decoded=${inbound?.value("framesDecoded")} " +
-            "dropped=${inbound?.value("framesDropped")} freezes=${inbound?.value("freezeCount")} " +
-            "videoPacketsLost=${inbound?.value("packetsLost")} audioPacketsLost=${audio?.value("packetsLost")} " +
-            "audioConcealedSamples=${audio?.value("concealedSamples")} dtls=${transport?.members?.get("dtlsState")}"
-        return CallNetworkStats(rtt, loss, jitter, available, outbound?.members?.get("qualityLimitationReason") == "cpu",
-            protocol == "tcp" || protocol == "tls", summary)
+        val limitation = outbound?.members?.get("qualityLimitationReason") as? String
+        val current = mutableMapOf<String, Counters>()
+
+        fun stream(rtp: RTCStats?, sending: Boolean): String {
+            if (rtp == null) return "Unavailable"
+            val bytes = rtp.value(if (sending) "bytesSent" else "bytesReceived")
+            val frames = rtp.value(if (sending) "framesEncoded" else "framesDecoded")
+            val old = previous[rtp.id]
+            current[rtp.id] = Counters(bytes, frames, rtp.timestampUs)
+            val seconds = old?.let { (rtp.timestampUs - it.timestampUs) / 1_000_000 }?.takeIf { it > 0 }
+            fun rate(now: Double?, before: Double?): Double? =
+                if (now != null && before != null && now >= before && seconds != null) (now - before) / seconds else null
+            val bitrate = rate(bytes, old?.bytes)?.times(.008)
+            val fps = rate(frames, old?.frames) ?: rtp.value("framesPerSecond")
+            val width = rtp.value("frameWidth")?.toInt()
+            val height = rtp.value("frameHeight")?.toInt()
+            val resolution = if (width != null && height != null && width > 0 && height > 0 && fps != 0.0)
+                "${width}×$height" else "Unavailable"
+            val codec = all[rtp.members["codecId"] as? String]?.members?.get("mimeType") ?: "Unavailable"
+            return "$resolution · ${fps.metric(" fps")} · ${bitrate.metric(" kbps")} · $codec"
+        }
+
+        val implementation = outbound?.members?.get("encoderImplementation")
+        val efficiency = outbound?.members?.get("powerEfficientEncoder") as? Boolean
+        val encoder = when {
+            implementation != null && efficiency == true -> "$implementation (power-efficient)"
+            implementation != null -> implementation.toString()
+            efficiency == true -> "Power-efficient (implementation unavailable)"
+            else -> "Unavailable"
+        }
+        val summary = listOf(
+            "Outgoing: ${stream(outbound, true)}",
+            "Incoming: ${stream(inbound, false)}",
+            "Encoder: $encoder",
+            "Route: $route · ${protocol.uppercase(java.util.Locale.ROOT)}",
+            "Available send / receive: ${available?.div(1000).metric(" kbps")} / ${pair?.value("availableIncomingBitrate")?.div(1000).metric(" kbps")}",
+            "RTT: ${rtt.metric(" ms")}",
+            "Send / receive jitter: ${jitter.metric(" ms")} / ${inbound?.value("jitter")?.times(1000).metric(" ms")}",
+            "Send loss: ${loss?.times(100).metric("%")} · Receive packets lost: ${inbound?.members?.get("packetsLost") ?: "Unavailable"}",
+            "Dropped frames: ${inbound?.members?.get("framesDropped") ?: "Unavailable"} · Freezes: ${inbound?.members?.get("freezeCount") ?: "Unavailable"}",
+            "Quality limit: ${limitation ?: "Unavailable"}",
+        ).joinToString("\n")
+        previous = current
+        return CallNetworkStats(rtt, loss, jitter, available, limitation == "cpu", limitation, summary)
     }
 }

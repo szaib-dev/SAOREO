@@ -1,8 +1,11 @@
 package com.codetic.saoreo
 
 import android.content.Context
+import android.content.ContentValues
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.provider.MediaStore
+import android.util.Log
 import androidx.room.*
 import androidx.work.*
 import kotlinx.coroutines.*
@@ -27,11 +30,14 @@ internal interface LyricsDao {
     @Query("SELECT * FROM lyrics WHERE song = :id") fun observe(id: String): Flow<CachedLyrics?>
     @Query("SELECT * FROM lyrics WHERE song = :id") suspend fun find(id: String): CachedLyrics?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun save(row: CachedLyrics)
+    @Query("DELETE FROM lyrics WHERE song = :id") suspend fun remove(id: String)
     @Query("DELETE FROM lyrics WHERE text IS NULL") suspend fun clearUnavailable()
 }
 
 @Database(entities = [CachedLyrics::class], version = 1, exportSchema = false)
 internal abstract class LyricsDb : RoomDatabase() { abstract fun lyrics(): LyricsDao }
+
+private const val LYRICS_MATCHING_VERSION = 3
 
 /** Audio-library observation keeps download and playlist execution independent of lyric requests. */
 internal class LyricsRepository(private val app: SaoreoApp) {
@@ -44,9 +50,9 @@ internal class LyricsRepository(private val app: SaoreoApp) {
 
     fun start() {
         scope.launch {
-            if (policy.getInt("matchingVersion", 0) < 2) {
+            if (policy.getInt("matchingVersion", 0) < LYRICS_MATCHING_VERSION) {
                 dao.clearUnavailable()
-                policy.edit().putInt("matchingVersion", 2).apply()
+                policy.edit().putInt("matchingVersion", LYRICS_MATCHING_VERSION).apply()
             }
             val observed = mutableSetOf<String>()
             app.dao.audio().collect { songs ->
@@ -67,30 +73,83 @@ internal class LyricsRepository(private val app: SaoreoApp) {
         val song = app.dao.find(id) ?: return@withContext
         if (song.state != JobState.COMPLETE.name || song.galleryUri == null || !song.mime.orEmpty().startsWith("audio/")) return@withContext
         val cached = dao.find(id)
-        if (cached?.text != null || cached != null && policy.getInt("matchingVersion", 0) >= 2 &&
+        if (cached?.text != null || cached != null && policy.getInt("matchingVersion", 0) >= LYRICS_MATCHING_VERSION &&
             System.currentTimeMillis() - cached.checked < TimeUnit.HOURS.toMillis(6)) return@withContext
         val query = readMetadata(song)
         if (!song.lyrics.isNullOrBlank()) return@withContext
-        if (query.title.length < 4 || query.duration <= 0) {
+        if (normalizedMusicName(query.title).isEmpty() || query.duration <= 0) {
             dao.save(CachedLyrics(id, query.title, query.artist, query.album, query.duration, null, false, System.currentTimeMillis()))
             return@withContext
         }
-        val exact = if (query.artist.isNotBlank()) request("get", query, true) else null
-        val candidates = if (exact is JSONObject && lyricsMatch(query, exact.optString("trackName"),
-                exact.optString("artistName"), exact.optString("albumName"), exact.optDouble("duration")) &&
-                exact.optString("syncedLyrics").let { it.isNotBlank() && it != "null" }) listOf(exact) else {
-            val results = request("search", query, false) as? JSONArray
-            listOfNotNull(exact as? JSONObject) + (0 until (results?.length() ?: 0)).mapNotNull { results?.optJSONObject(it) }
+        fun match(row: JSONObject): CachedLyrics? {
+            val artist = row.optString("artistName")
+            val album = row.optString("albumName")
+            if (!lyricsMatch(query, row.optString("trackName"), artist, album, row.optDouble("duration"))) return null
+            val synced = row.optString("syncedLyrics").takeIf { parseLyrics(it).any { line -> line.time != null } }
+            val text = synced ?: row.optString("plainLyrics").takeUnless { it.isBlank() || it == "null" } ?: return null
+            return CachedLyrics(id, query.title, artist, album, query.duration, text, synced != null,
+                System.currentTimeMillis(), row.optLong("id").takeIf { it > 0 })
         }
-        val matches = candidates.filter { row -> lyricsMatch(query, row.optString("trackName"),
-            row.optString("artistName"), row.optString("albumName"), row.optDouble("duration")) }
-        val match = if (matches.map { normalizedMusicName(it.optString("artistName")) }.distinct().size == 1)
-            matches.sortedByDescending { !it.optString("syncedLyrics").let { s -> s.isBlank() || s == "null" } }.firstOrNull() else null
-        val synced = match?.optString("syncedLyrics")?.takeUnless { it.isBlank() || it == "null" }
-            ?.takeIf { parseLyrics(it).any { line -> line.time != null } }
-        val text = synced ?: match?.optString("plainLyrics")?.takeUnless { it.isBlank() || it == "null" }
-        dao.save(CachedLyrics(id, query.title, match?.optString("artistName") ?: query.artist, query.album, query.duration, text,
-            synced != null, System.currentTimeMillis(), match?.optLong("id")))
+        val exact = if (query.artist.isNotBlank() && query.duration <= 3_600_000)
+            (request("get", query, true) as? JSONObject)?.let(::match) else null
+        val result = exact ?: run {
+            val results = request("search", query.copy(artist = lyricsPrimaryArtist(query.artist)), false) as? JSONArray
+            val matches = (0 until (results?.length() ?: 0)).mapNotNull { results?.optJSONObject(it)?.let(::match) }
+            if (query.artist.isBlank() && matches.map { normalizedMusicName(it.artist) }.distinct().size > 1) null
+            else matches.firstOrNull { it.synced } ?: matches.firstOrNull()
+        }
+        app.publications.withLock {
+            if (app.dao.find(id) == null) return@withLock
+            if (result?.text != null && song.source == Source.YOUTUBE.name) {
+                runCatching { saveSidecar(Uri.parse(song.galleryUri), result.text) }
+                    .onFailure { Log.w("Lyrics", "Could not save the lyrics file for ${song.id}", it) }
+            }
+            dao.save(result ?: CachedLyrics(id, query.title, query.artist, query.album, query.duration, null, false, System.currentTimeMillis()))
+        }
+    }
+
+    fun ownedSidecar(audio: Uri): Uri? {
+        if (audio.authority != MediaStore.AUTHORITY) return null
+        val resolver = app.contentResolver
+        val columns = arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.RELATIVE_PATH)
+        val (name, directory) = resolver.query(audio, columns, null, null, null)?.use {
+            if (!it.moveToFirst()) null else it.getString(0) to it.getString(1)
+        } ?: return null
+        val files = MediaStore.Files.getContentUri(MediaStore.getVolumeName(audio))
+        return resolver.query(files, arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ?",
+            arrayOf("${name.substringBeforeLast('.')}.lrc", directory, app.packageName), null)?.use {
+            if (it.moveToFirst()) Uri.withAppendedPath(files, it.getLong(0).toString()) else null
+        }
+    }
+
+    private fun saveSidecar(audio: Uri, text: String) {
+        if (audio.authority != MediaStore.AUTHORITY) return
+        val resolver = app.contentResolver
+        val columns = arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.RELATIVE_PATH)
+        val (name, directory) = resolver.query(audio, columns, null, null, null)?.use {
+            if (!it.moveToFirst()) null else it.getString(0) to it.getString(1)
+        } ?: return
+        val files = MediaStore.Files.getContentUri(MediaStore.getVolumeName(audio))
+        val sidecarName = "${name.substringBeforeLast('.')}.lrc"
+        if (resolver.query(files, arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                arrayOf(sidecarName, directory), null)?.use { it.moveToFirst() } == true) return
+        val sidecar = resolver.insert(files, ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, sidecarName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "application/lrc")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, directory)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }) ?: throw IOException("Could not create lyrics file")
+        try {
+            resolver.openOutputStream(sidecar)?.bufferedWriter()?.use { it.write(text) }
+                ?: throw IOException("Could not write lyrics file")
+            if (resolver.update(sidecar, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null) != 1)
+                throw IOException("Could not publish lyrics file")
+        } catch (error: Exception) {
+            runCatching { resolver.delete(sidecar, null, null) }
+            throw error
+        }
     }
 
     private fun readMetadata(song: Download): LyricsMetadata {

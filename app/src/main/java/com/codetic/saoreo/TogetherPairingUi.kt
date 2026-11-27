@@ -11,9 +11,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.runtime.*
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -32,11 +37,9 @@ internal fun shareTogetherLink(context: Context, link: String, title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
+internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState, showHeader: Boolean = true) {
     val partner = state.partner ?: return
-    var tab by rememberSaveable { mutableIntStateOf(0) }
     var confirmUnpair by rememberSaveable { mutableStateOf(false) }
-    val kind = PairKind.entries[tab]
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val availability = Intent(context, TogetherAvailabilityService::class.java)
@@ -48,37 +51,13 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startAvailability() else pairing.error("Allow notifications to receive calls when Together is closed.")
     }
-    LaunchedEffect(partner, state.availableInBackground) {
-        if (!state.availableInBackground && pairing.resumeAvailabilityAtBoot &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) startAvailability()
-        val preferences = context.getSharedPreferences("together-background-setup", Context.MODE_PRIVATE)
-        if (!preferences.getBoolean("offered-v2", false)) {
-            preferences.edit().putBoolean("offered-v2", true).apply()
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-                startAvailability()
-            } else notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
+    if (showHeader) {
     Text(partner, style = MaterialTheme.typography.headlineSmall)
     Text(when {
         !state.connected -> "Connecting to Together…"
         state.online -> "Available"
         else -> "Offline"
     }, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-    PrimaryTabRow(selectedTabIndex = tab) {
-        listOf("Streaming", "Audio call", "Video call").forEachIndexed { index, title ->
-            Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
-        }
-    }
-    Button({ pairing.ring(kind) }, enabled = state.connected && state.ring == null && state.requesting == null, modifier = Modifier.fillMaxWidth()) {
-        val icon = when (kind) { PairKind.WATCH -> R.drawable.ic_media_play; PairKind.AUDIO -> R.drawable.ic_call; PairKind.VIDEO -> R.drawable.ic_camera }
-        Icon(painterResource(icon), null, Modifier.size(20.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(if (state.requesting != null) "Calling..." else when (kind) { PairKind.WATCH -> "Send watch invite"; PairKind.AUDIO -> "Start audio call"; PairKind.VIDEO -> "Start video call" })
-    }
-    if (kind != PairKind.WATCH) OutlinedButton({ pairing.ring(kind, silent = true) },
-        enabled = state.connected && state.ring == null && state.requesting == null, modifier = Modifier.fillMaxWidth()) {
-        Text("Call silently")
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically) {
@@ -112,6 +91,31 @@ internal fun PairedTogetherActions(pairing: TogetherPairing, state: PairState) {
                 }
             }) { Text("Unpair") }
         }, dismissButton = { TextButton({ confirmUnpair = false }) { Text("Cancel") } })
+}
+
+@Composable
+internal fun PreparePairedAvailability(pairing: TogetherPairing, state: PairState) {
+    val partner = state.partner ?: return
+    val context = LocalContext.current
+    fun startAvailability() {
+        runCatching { ContextCompat.startForegroundService(context, Intent(context, TogetherAvailabilityService::class.java)) }
+            .onSuccess { pairing.setAvailabilityPreference(true) }
+            .onFailure { pairing.error("Couldn’t start background calls.") }
+    }
+    val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startAvailability()
+    }
+    LaunchedEffect(partner, state.availableInBackground) {
+        if (!state.availableInBackground && pairing.resumeAvailabilityAtBoot &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) startAvailability()
+        val preferences = context.getSharedPreferences("together-background-setup", Context.MODE_PRIVATE)
+        if (!preferences.getBoolean("offered-v2", false)) {
+            preferences.edit().putBoolean("offered-v2", true).apply()
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                startAvailability()
+            } else notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 }
 
 @Composable
@@ -157,7 +161,7 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
         return
     }
 
-    val ring = state.ring?.takeUnless { it.incoming && it.kind != PairKind.WATCH }
+    val ring = state.ring?.takeIf { it.kind == PairKind.WATCH }
     var expired by remember(ring?.id) { mutableStateOf(false) }
     LaunchedEffect(ring?.id, ring?.until) {
         if (ring != null) {
@@ -167,6 +171,7 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
     }
     val incoming = ring?.takeIf { it.incoming && !expired && state.visible }
     DisposableEffect(incoming?.id) {
+        incoming?.let { pairing.acknowledgeIncomingAlert(it.id) }
         val ringtone = incoming?.takeIf { !it.silent && togetherCallAlertsAllowed(context) }?.let {
             runCatching {
                 RingtoneManager.getRingtone(context, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
@@ -189,10 +194,11 @@ internal fun TogetherPairDialogs(pairing: TogetherPairing, state: PairState, lin
 }
 
 @Composable
-internal fun TogetherIncomingCall(ring: PairRing, partner: String, answer: (Boolean) -> Unit) {
+internal fun TogetherIncomingCall(ring: PairRing, partner: String, alertActive: () -> Unit = {}, message: (() -> Unit)? = null, photo: java.io.File? = null, photoRevision: Int = 0, answer: (Boolean) -> Unit) {
     val context = LocalContext.current
     val activity = androidx.activity.compose.LocalActivity.current
     DisposableEffect(ring.id) {
+        alertActive()
         val alert = !ring.silent && togetherCallAlertsAllowed(context)
         activity?.setShowWhenLocked(alert)
         activity?.setTurnScreenOn(alert)
@@ -207,24 +213,105 @@ internal fun TogetherIncomingCall(ring: PairRing, partner: String, answer: (Bool
         }
     }
     androidx.activity.compose.BackHandler { answer(false) }
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp, vertical = 24.dp),
+    val callIcon = if (ring.kind == PairKind.VIDEO) R.drawable.ic_camera else R.drawable.ic_call
+    Surface(Modifier.fillMaxSize(), color = Color(0xff111214), contentColor = Color(0xfff7f7f7)) {
+        Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 26.dp),
             horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(42.dp))
+            Icon(painterResource(callIcon), null, Modifier.size(25.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("Incoming ${ring.kind.title.lowercase()}", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.weight(1f))
-            Surface(Modifier.size(96.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(partner.take(1).uppercase(), style = MaterialTheme.typography.displaySmall)
-                }
-            }
-            Spacer(Modifier.height(20.dp))
-            Text(partner, style = MaterialTheme.typography.headlineLarge)
-            Text("Incoming ${ring.kind.title.lowercase()}", Modifier.padding(top = 6.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.weight(1f))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton({ answer(false) }, Modifier.weight(1f).height(52.dp)) { Text("Decline") }
-                Button({ answer(true) }, Modifier.weight(1f).height(52.dp)) { Text("Answer") }
+            PartnerAvatar(partner, 110, picture = photo, revision = photoRevision)
+            Spacer(Modifier.height(18.dp))
+            Text(partner, style = MaterialTheme.typography.headlineMedium)
+            Spacer(Modifier.weight(2f))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                if (message != null) InvitationAction("Message", R.drawable.ic_chat, Color(0xff252629), Color.White, message)
+                SlideToAnswer(callIcon) { answer(true) }
+                InvitationAction("Decline", R.drawable.ic_call_end, Color(0xffe93641), Color.White) { answer(false) }
             }
         }
     }
 }
+
+@Composable
+private fun InvitationAction(label: String, icon: Int, background: Color, foreground: Color, action: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilledIconButton(onClick = action, modifier = Modifier.size(58.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = background, contentColor = foreground)) {
+            Icon(painterResource(icon), label, Modifier.size(25.dp))
+        }
+        Text(label, style = MaterialTheme.typography.labelMedium, color = Color.White)
+    }
+}
+
+@Composable
+internal fun TogetherOutgoingCall(kind: PairKind, partner: String, ringing: Boolean, silent: Boolean,
+    call: TogetherCall, state: TogetherCallState, muted: Boolean, toggleMic: () -> Unit, speaker: Boolean,
+    toggleSpeaker: () -> Unit, minimize: () -> Unit, cancel: () -> Unit,
+    photo: java.io.File? = null, photoRevision: Int = 0) {
+    val context = LocalContext.current
+    val owner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val lifecycle by owner.lifecycle.currentStateFlow.collectAsState()
+    val cameraAvailable = kind == PairKind.VIDEO && lifecycle == androidx.lifecycle.Lifecycle.State.RESUMED
+    var cameraGranted by remember { mutableStateOf(context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
+    val requestCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { cameraGranted = it }
+    LaunchedEffect(kind) { if (kind == PairKind.VIDEO && !cameraGranted) requestCamera.launch(Manifest.permission.CAMERA) }
+    DisposableEffect(call, cameraAvailable, cameraGranted) {
+        if (cameraAvailable && cameraGranted) call.previewBeforeCall(true)
+        onDispose { if (cameraAvailable && cameraGranted) call.previewBeforeCall(false) }
+    }
+    androidx.activity.compose.BackHandler { minimize() }
+    val icon = if (kind == PairKind.VIDEO) R.drawable.ic_camera else R.drawable.ic_call
+    Surface(Modifier.fillMaxSize(), color = chatCharcoal, contentColor = Color.White) {
+        Box(Modifier.fillMaxSize()) {
+            if (cameraAvailable && state.camera) CameraTile("Your camera", state.localVideo, true, call,
+                mirror = true, modifier = Modifier.fillMaxSize(), fill = true, overlay = false, rounded = false, showLabel = false)
+            Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(minimize, Modifier.align(Alignment.Start)) {
+                    Icon(androidx.compose.material.icons.Icons.AutoMirrored.Outlined.ArrowBack, "Back to chat")
+                }
+                Icon(painterResource(icon), null, Modifier.size(27.dp))
+                Spacer(Modifier.height(9.dp))
+                Text(if (ringing) "Ringing $partner…" else "Calling $partner…", style = MaterialTheme.typography.titleLarge)
+                Text(if (silent) "${kind.title} · silent" else kind.title, color = Color(0xffc6c6ca))
+                Spacer(Modifier.weight(1f))
+                if (!state.camera) PartnerAvatar(partner, 110, picture = photo, revision = photoRevision)
+                Spacer(Modifier.weight(2f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    if (kind == PairKind.VIDEO) InvitationAction("Switch camera", R.drawable.ic_camera_flip, Color(0xff252629), Color.White, call::flip)
+                    else InvitationAction(if (speaker) "Speaker on" else "Speaker", R.drawable.ic_speaker, Color(0xff252629), Color.White, toggleSpeaker)
+                    InvitationAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ic_mic_off else R.drawable.ic_mic, Color(0xff252629), Color.White, toggleMic)
+                    InvitationAction("Cancel", R.drawable.ic_call_end, Color(0xffe93641), Color.White, cancel)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SlideToAnswer(icon: Int, answer: () -> Unit) {
+    val latestAnswer by rememberUpdatedState(answer)
+    var drag by remember { mutableFloatStateOf(0f) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(Modifier.size(56.dp).pointerInput(Unit) {
+            val threshold = 44.dp.toPx()
+            detectVerticalDragGestures(onDragCancel = { drag = 0f }, onDragEnd = {
+                val accepted = drag <= -threshold
+                drag = 0f
+                if (accepted) latestAnswer()
+            }) { change, amount -> change.consume(); drag = (drag + amount).coerceIn(-90.dp.toPx(), 0f) }
+        }.semantics { onClick(label = "Answer call") { latestAnswer(); true } },
+            color = Color(0xffc9ee65), shape = androidx.compose.foundation.shape.CircleShape) {
+            Box(Modifier.offset { androidx.compose.ui.unit.IntOffset(0, (drag * .25f).toInt()) },
+                contentAlignment = Alignment.Center) {
+                Icon(painterResource(icon), null, tint = Color(0xff131909))
+            }
+        }
+        Text("Swipe up to answer", Modifier.padding(top = 6.dp), color = Color.White,
+            style = MaterialTheme.typography.labelSmall)
+    }
+}
+

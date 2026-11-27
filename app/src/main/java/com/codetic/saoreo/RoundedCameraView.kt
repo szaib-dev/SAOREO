@@ -14,7 +14,7 @@ import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 
 /** A texture is composited with the surrounding view, including the preview's rounded outline. */
-internal class RoundedCameraView(context: Context, eglContext: EglBase.Context) :
+internal class RoundedCameraView(context: Context, eglContext: EglBase.Context, rounded: Boolean = true) :
     TextureView(context), TextureView.SurfaceTextureListener, VideoSink {
     private val renderer = EglRenderer("Together rounded preview")
     private var fill = false
@@ -24,7 +24,7 @@ internal class RoundedCameraView(context: Context, eglContext: EglBase.Context) 
     init {
         renderer.init(eglContext, EglBase.CONFIG_PLAIN, GlRectDrawer())
         surfaceTextureListener = this
-        clipToOutline = true
+        clipToOutline = rounded
         val radius = 20 * resources.displayMetrics.density
         outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(view: View, outline: Outline) {

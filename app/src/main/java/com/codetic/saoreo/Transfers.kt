@@ -71,7 +71,8 @@ class DownloadQueue(private val app: SaoreoApp) {
         val existing = app.dao.activeFor(item.source).firstOrNull {
             MediaLink.parse(it.url)?.metadataKey() == link.metadataKey() && it.choice == item.choice &&
                 it.quality == item.quality && it.folder == item.folder && it.targetPlaylist == item.targetPlaylist &&
-                it.clipStart == item.clipStart && it.clipEnd == item.clipEnd && it.audioBitrate == item.audioBitrate
+                it.clipStart == item.clipStart && it.clipEnd == item.clipEnd && it.audioBitrate == item.audioBitrate &&
+                it.localTitle == item.localTitle && it.artist == item.artist
         }
         if (existing != null) return@withLock existing.id
         withContext(NonCancellable) {
@@ -130,6 +131,22 @@ class DownloadQueue(private val app: SaoreoApp) {
         app.dao.update(latest.copy(state = JobState.CANCELLED.name, error = "Cancelled"))
         withContext(Dispatchers.IO) { manager.cancelUniqueWork(item.id).result.get() }
         app.downloadNotices.end(item.id)
+    }
+
+    internal suspend fun deleteSong(id: String) = app.publications.withLock {
+        val song = app.dao.find(id) ?: return@withLock
+        if (song.state != JobState.COMPLETE.name || song.mime?.startsWith("audio/") != true) return@withLock
+        val uri = song.galleryUri
+        val shared = uri != null && app.dao.hasOtherFileReference(uri, id)
+        withContext(NonCancellable + Dispatchers.IO) {
+            val sidecar = if (uri != null && !shared && song.source == Source.YOUTUBE.name)
+                app.lyrics.ownedSidecar(Uri.parse(uri)) else null
+            if (sidecar != null) app.contentResolver.delete(sidecar, null, null)
+            if (shared) app.dao.remove(id)
+            else if (song.source == Source.IMPORTED.name) app.collections.removeSong(song)
+            else remove(song, true)
+            app.lyrics.dao.remove(id)
+        }
     }
 
     suspend fun remove(item: Download, delete: Boolean) {
@@ -299,7 +316,7 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 app.extractor.downloadYoutube(link, if (choice.audioOnly) Quality.AUDIO else requested.takeUnless {
                     it == Quality.AUDIO
                 } ?: Quality.BEST, choice.height, workspace, settings.timeout,
-                    if (settings.retry) settings.retries else 0, settings.resume, item.audioBitrate, progressValue::set).first
+                    if (settings.retry) settings.retries else 0, settings.resume, item.audioBitrate, progressValue::set).file
             } else {
                 val originalAudio = choice.reusableStreams.singleOrNull()?.extension
                     ?.takeIf { section != null && choice.audioOnly && it in setOf("m4a", "webm", "ogg", "opus", "aac") }
@@ -355,13 +372,16 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 delay(650)
             }
         }
-        val (file, title) = try {
+        val downloaded = try {
             withTimeoutOrNull(6L * 60 * 60 * 1000) {
                 app.extractor.downloadYoutube(link, requested, selectedHeight, workspace, settings.timeout,
                     if (settings.retry) settings.retries else 0, settings.resume, item.audioBitrate, latest::set)
             } ?: throw IOException("Transfer timed out")
         } finally { updater.cancel() }
-        saveTransfer(item.copy(title = title ?: item.title), file, requested == Quality.AUDIO, settings)
+        val audio = requested == Quality.AUDIO
+        val resolved = item.copy(title = downloaded.title ?: item.title)
+        saveTransfer(if (audio) resolved.copy(localTitle = item.localTitle ?: downloaded.track,
+            artist = item.artist ?: downloaded.artist, duration = downloaded.duration) else resolved, downloaded.file, audio, settings)
     }
 
     private suspend fun saveTransfer(item: Download, file: File, audio: Boolean, settings: Settings): Result {
@@ -375,6 +395,8 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     app.database.withTransaction {
                         val current = app.dao.find(key) ?: throw IOException("Download record unavailable")
                         app.dao.update(current.copy(title = item.title, thumbnail = item.thumbnail, detail = item.detail,
+                            localTitle = current.localTitle ?: item.localTitle, artist = current.artist ?: item.artist,
+                            duration = current.duration.takeIf { it > 0 } ?: item.duration,
                             state = JobState.COMPLETE.name, progress = 100, error = null,
                             galleryUri = uri.toString(), mime = mime, bytes = file.length()))
                         val playlist = current.targetPlaylist

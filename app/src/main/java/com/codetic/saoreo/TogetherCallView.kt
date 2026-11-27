@@ -35,7 +35,7 @@ import java.util.Locale
 private val CallAccent = Color(0xFFC2B1FF)
 private val CallGlass = Color(0xBA211E2A)
 private val CallGlassBorder = Color(0x35E4DCFA)
-private enum class CallPanelContent { OPTIONS, AUDIO }
+private enum class CallPanelContent { OPTIONS, AUDIO, VIDEO }
 
 @Composable
 internal fun TogetherCallView(
@@ -47,6 +47,7 @@ internal fun TogetherCallView(
     connectionNotice: String? = null,
     chatPreviews: List<TogetherChat> = emptyList(),
     openStream: () -> Unit = onBack,
+    pairedChat: (@Composable () -> Unit)? = null,
 ) {
     val peer = room.members.firstOrNull { it.id != room.member }
     val localVideoOn = calling.camera || calling.sharing
@@ -58,11 +59,11 @@ internal fun TogetherCallView(
     var localFocused by rememberSaveable(room.room) { mutableStateOf(false) }
     var panel by remember { mutableStateOf<CallPanelContent?>(null) }
     BackHandler(enabled = panel != null) {
-        panel = if (panel == CallPanelContent.AUDIO) CallPanelContent.OPTIONS else null
+        panel = if (panel == CallPanelContent.AUDIO || panel == CallPanelContent.VIDEO) CallPanelContent.OPTIONS else null
     }
     var previewX by rememberSaveable(room.room) { mutableFloatStateOf(1f) }
     var previewY by rememberSaveable(room.room) { mutableFloatStateOf(0f) }
-    val localMain = localFocused && !previewHidden && localVideoOn && peerVideoOn
+    val localMain = !chatOpen && localFocused && !previewHidden && localVideoOn && peerVideoOn
     val hasPreview = localVideoOn && !previewHidden
     val showControls = controlsVisible || chatOpen || panel != null
     var touchedAt by remember { mutableLongStateOf(0L) }
@@ -85,7 +86,7 @@ internal fun TogetherCallView(
         if (chatOpen && messages.isNotEmpty()) scroll.scrollToItem(messages.lastIndex)
     }
     Column(modifier.fillMaxSize().background(Color.Black)) {
-        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(if (chatOpen) 0.4f else 1f)) {
             val insetSides = WindowInsets.safeDrawing.asPaddingValues()
             val layoutDirection = LocalLayoutDirection.current
             val left = insetSides.calculateLeftPadding(layoutDirection) + 12.dp
@@ -111,7 +112,7 @@ internal fun TogetherCallView(
                 if (localMain) localName else peerName,
                 if (localMain) calling.localVideo else calling.remoteVideo,
                 if (localMain) localVideoOn else peerVideoOn, call, localMain && !calling.sharing,
-                Modifier.fillMaxSize(), rounded = false, showLabel = false, overlay = false,
+                Modifier.fillMaxSize(), rounded = false, showLabel = false, overlay = false, clipVideo = chatOpen,
             )
             if (calling.remoteBackground) Text("$peerName is using other apps",
                 Modifier.align(Alignment.Center).background(CallGlass, RoundedCornerShape(12.dp)).padding(12.dp),
@@ -136,7 +137,7 @@ internal fun TogetherCallView(
                                 if (dragHeightPx > 0f) previewY = (previewY + amount.y / dragHeightPx).coerceIn(0f, 1f)
                             }
                         }
-                        .clickable(enabled = peerVideoOn, interactionSource = null, indication = null, onClickLabel = "Swap video views") {
+                        .clickable(enabled = peerVideoOn && !chatOpen, interactionSource = null, indication = null, onClickLabel = "Swap video views") {
                             localFocused = !localMain
                         },
                     fill = if (localMain) !calling.remoteSharing else !calling.sharing,
@@ -163,7 +164,7 @@ internal fun TogetherCallView(
                         }
                     }
                     Column(Modifier.weight(1f)) {
-                        CallHeader(standaloneKind, calling, connectionNotice, calling.connectedAtMs)
+                        CallHeader(standaloneKind, calling, calling.mediaWarning ?: connectionNotice, calling.connectedAtMs)
                         if (calling.retryAvailable) TextButton(call::retryConnection) { Text("Retry connection") }
                     }
                 }
@@ -181,13 +182,18 @@ internal fun TogetherCallView(
                         CallPanelContent.OPTIONS -> TogetherCallOptionsPanel(
                             calling, previewHidden, localVideoOn, ::hideOrShowPreview,
                             showAudio = { panel = CallPanelContent.AUDIO },
+                            showVideo = { panel = CallPanelContent.VIDEO },
                             openStream = { panel = null; openStream() },
                             shareScreen = { panel = null; toggleScreenShare() },
                             toggleTorch = { call.torch(!calling.torch) },
+                            toggleRemote = { call.muteRemote(!calling.remoteMuted) },
                             hideControls = ::toggleControls, modifier = panelModifier,
                         )
                         CallPanelContent.AUDIO -> TogetherCallAudioPanel(
                             calling, call, close = { panel = null }, modifier = panelModifier,
+                        )
+                        CallPanelContent.VIDEO -> TogetherCallVideoPanel(
+                            calling, call, close = { panel = CallPanelContent.OPTIONS }, modifier = panelModifier,
                         )
                         null -> Unit
                     }
@@ -215,7 +221,9 @@ internal fun TogetherCallView(
                 }
             }
         }
-        if (chatOpen) Surface(Modifier.fillMaxWidth().weight(1f)) {
+        if (chatOpen && pairedChat != null) Box(Modifier.fillMaxWidth().weight(0.6f).navigationBarsPadding()) {
+            pairedChat()
+        } else if (chatOpen) Surface(Modifier.fillMaxWidth().weight(0.6f)) {
             Column(Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 LazyColumn(Modifier.fillMaxWidth().weight(1f), state = scroll, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(messages, key = { it.id }) { entry ->

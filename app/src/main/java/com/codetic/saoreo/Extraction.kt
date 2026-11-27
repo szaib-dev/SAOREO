@@ -176,22 +176,25 @@ class Extractor(private val context: Context) {
             ?: throw IOException("No close YouTube match for ${item.title}")
     }
 
+    internal data class YoutubeFile(val file: File, val title: String?, val track: String?, val artist: String?, val duration: Long)
+
     internal suspend fun downloadYoutube(
         link: MediaLink, quality: Quality, selectedHeight: Int?, directory: File, timeout: Int,
         retries: Int, resume: Boolean, bitrate: Int?, progress: (TransferProgress) -> Unit,
-    ): Pair<File, String?> {
+    ): YoutubeFile {
         require(link.source == Source.YOUTUBE)
         val audio = quality == Quality.AUDIO
         val output = Choice("output", selectedHeight, if (audio) "mp3" else "mp4", null,
             audioOnly = audio, requiresAudio = true)
         val result = File(directory, "result.json")
-        fun title(): String? = runCatching {
-            JSONObject(result.readText()).optString("title").take(240).ifBlank { null }
-        }.getOrNull()
         val canonical = link.canonicalYoutubeVideo()?.let { link.copy(url = it) } ?: link
         val file = download(canonical, output, directory, timeout, retries, resume, bitrate,
             selector = youtubeSelection(quality, selectedHeight), resultInfo = result, progress = progress)
-        return file to withContext(Dispatchers.IO) { title() }
+        return withContext(Dispatchers.IO) {
+            val info = runCatching { JSONObject(result.useLines { lines -> lines.last { it.isNotBlank() } }) }.getOrNull()
+            YoutubeFile(file, info?.musicField("title"), info?.musicField("track"), info?.youtubeMusicArtist(),
+                info?.optDouble("duration")?.takeIf { it.isFinite() && it > 0 }?.times(1000)?.toLong() ?: 0)
+        }
     }
 
     internal suspend fun download(
@@ -263,7 +266,8 @@ class Extractor(private val context: Context) {
                 if (link.source == Source.YOUTUBE) addOption("--check-formats")
                 if (resultInfo != null) {
                     addOption("--no-simulate")
-                    addCommands(listOf("--print-to-file", """before_dl:{"title":%(title)j,"formats":%(requested_formats)j,"filesize":%(filesize)j,"filesize_approx":%(filesize_approx)j}""", resultInfo.absolutePath))
+                    addOption("--output-na-placeholder", "null")
+                    addCommands(listOf("--print-to-file", """before_dl:{"title":%(title)j,"track":%(track)j,"artist":%(artist)j,"artists":%(artists)j,"channel":%(channel)j,"duration":%(duration)j,"formats":%(requested_formats)j,"filesize":%(filesize)j,"filesize_approx":%(filesize_approx)j}""", resultInfo.absolutePath))
                     addOption("-S", "res,vcodec:h264,acodec:aac")
                 }
                 addOption("-o", File(outputDirectory, "media.%(ext)s").absolutePath)

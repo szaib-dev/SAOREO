@@ -36,4 +36,12 @@ class LyricsTest {
         assertEquals(listOf(1200L, 3456L), parseLyrics("[00:01.20][00:03.456]Repeat").map { it.time })
         assertTrue(parseLyrics("[ar:Artist]\n[ti:Title]").isEmpty())
     }
+
+    @Test fun shortTracksAndCollaborationsStillRequireCorrectTrackAndDuration() {
+        val song = identifyLyricsMetadata("Adele - 22 (Official Video)", "Adele, Other Artist", null, 216000)
+        assertEquals("22", song.title)
+        assertTrue(lyricsMatch(song, "22", "Adele", null, 216.0))
+        assertFalse(lyricsMatch(song, "22", "Taylor Swift", null, 216.0))
+        assertFalse(lyricsMatch(song, "22", "Adele", null, 220.0))
+    }
 }

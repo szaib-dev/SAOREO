@@ -30,8 +30,8 @@ class FcmSender:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as http:
                 async with http.post(f'https://fcm.googleapis.com/v1/projects/{self.project}/messages:send',
                         headers={'Authorization': f'Bearer {access}'}, json={'message': {
-                            'token': token, 'data': {'type': 'call_wake', 'ring': identifier},
-                            'android': {'priority': 'HIGH', 'ttl': f'{max(1, min(ttl, 30))}s',
+                            'token': token, 'data': {'type': 'chat_wake'} if identifier is None else {'type': 'call_wake', 'ring': identifier},
+                            'android': {'priority': 'HIGH', 'ttl': f'{max(1, min(ttl, 86400 if identifier is None else 30))}s',
                                         'restricted_package_name': 'com.codetic.saoreo'}}}) as response:
                     if response.status == 200:
                         return True
